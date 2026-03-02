@@ -1,0 +1,5 @@
+{
+  "name": "Paski Reconciliation Tool V2",
+  "description": "Financial auditing tool for შპს პასკი to reconcile PDF invoices with bank statements.",
+  "requestFramePermissions": []
+}
