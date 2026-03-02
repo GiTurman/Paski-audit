@@ -358,35 +358,51 @@ export default function App() {
             let headerRowIdx = -1;
             for (let r = 0; r < Math.min(10, raw.length); r++) {
               const row = raw[r];
-              if (row && row.some(cell => String(cell).toLowerCase().includes('კლიენტი') || String(cell).toLowerCase().includes('დასახელება') || String(cell).toLowerCase().includes('client'))) {
+              if (row && row.some(cell => {
+                const s = String(cell).toLowerCase().trim();
+                return s === 'vendor name' || s === 'client' || s === 'კლიენტი' || s === 'დასახელება';
+              })) {
                 headerRowIdx = r;
                 break;
               }
             }
             
-            const startIdx = headerRowIdx >= 0 ? headerRowIdx + 1 : 1;
+            if (headerRowIdx === -1) headerRowIdx = 0;
+            const headerRow = raw[headerRowIdx] || [];
+            const keys = headerRow.map(k => String(k).toLowerCase().trim());
+            
+            const invCol = keys.findIndex(k => k === 'invoice #' || k.includes('ინვოისი'));
+            const dateCol = keys.findIndex(k => k === 'invoice date' || k === 'თარიღი');
+            const clientCol = keys.findIndex(k => k === 'vendor name' || k === 'client' || k === 'დასახელება' || k === 'კლიენტი');
+            const descCol = keys.findIndex(k => k === 'description' || k.includes('გაწეული მომსახურება'));
+            let totalCol = keys.findIndex(k => k === 'invoice total' || k === 'თანხა');
+            if (totalCol === -1) totalCol = keys.findIndex(k => k.includes('total'));
+            const currCol = keys.findIndex(k => k === 'currency' || k === 'ვალუტა');
+
+            const startIdx = headerRowIdx + 1;
+            const invoiceMap = new Map<string, Invoice>();
             
             for (let r = startIdx; r < raw.length; r++) {
               const row = raw[r];
-              if (!row || row.length < 5) continue;
+              if (!row || row.length === 0) continue;
               
-              const client = String(row[1] || '').trim();
-              const description = String(row[2] || '').trim();
-              const currency = String(row[3] || '').trim().toUpperCase();
-              let amount = parseFloat(row[4]);
-              const dateRaw = row[6]; // "თარიღი" column
+              const client = clientCol >= 0 ? String(row[clientCol] || '').trim() : '';
+              const description = descCol >= 0 ? String(row[descCol] || '').trim() : '';
+              const currency = currCol >= 0 ? String(row[currCol] || '').trim().toUpperCase() : 'USD';
+              let amount = totalCol >= 0 ? parseFloat(row[totalCol]) : NaN;
+              const dateRaw = dateCol >= 0 ? row[dateCol] : '';
+              let invoiceNumber = invCol >= 0 ? String(row[invCol] || '').trim() : '';
               
-              if (!client || !description || isNaN(amount)) continue;
+              if (!client || isNaN(amount)) continue;
               
-              // Extract invoice number from description
-              let invoiceNumber = '';
-              const refs = extractInvoiceRefs(description);
-              if (refs.length > 0) {
-                invoiceNumber = refs[0];
-              } else {
-                // Try to find "Invoice #..."
-                const match = description.match(/Invoice\s*#\s*(\S+)/i);
-                if (match) invoiceNumber = match[1];
+              if (!invoiceNumber && description) {
+                const refs = extractInvoiceRefs(description);
+                if (refs.length > 0) {
+                  invoiceNumber = refs[0];
+                } else {
+                  const match = description.match(/Invoice\s*#\s*(\S+)/i);
+                  if (match) invoiceNumber = match[1];
+                }
               }
               
               if (!invoiceNumber) continue;
@@ -398,13 +414,17 @@ export default function App() {
                 amountUSD = amount / 2.7; // Fallback estimate
               }
               
-              parsedInvoices.push({
-                invoiceNumber,
-                date,
-                client,
-                amountUSD: Math.round(amountUSD * 100) / 100
-              });
+              if (!invoiceMap.has(invoiceNumber)) {
+                invoiceMap.set(invoiceNumber, {
+                  invoiceNumber,
+                  date,
+                  client,
+                  amountUSD: Math.round(amountUSD * 100) / 100
+                });
+              }
             }
+            
+            parsedInvoices.push(...Array.from(invoiceMap.values()));
           }
         } catch (err) {
           console.error(`Error processing Excel invoice ${file.name}:`, err);
