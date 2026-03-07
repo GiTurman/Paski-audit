@@ -363,6 +363,8 @@ export default function App() {
       const excelFiles = fileArray.filter(f => f.name.toLowerCase().match(/\.(xlsx|xls|csv)$/));
       
       let parsedInvoices: Invoice[] = [];
+      const invoiceMap = new Map<string, Invoice>();
+      const billMap = new Map<string, Bill>();
 
       // Process Excel files
       for (let i = 0; i < excelFiles.length; i++) {
@@ -405,8 +407,6 @@ export default function App() {
             const fxrCol = keys.findIndex(k => k === 'fxr' || k === 'კურსი');
 
             const startIdx = headerRowIdx + 1;
-            const invoiceMap = new Map<string, Invoice>();
-            const billMap = new Map<string, Bill>();
             
             for (let r = startIdx; r < raw.length; r++) {
               const row = raw[r];
@@ -474,12 +474,13 @@ export default function App() {
             }
             
             parsedInvoices.push(...Array.from(invoiceMap.values()));
-            setBills(Array.from(billMap.values()));
           }
         } catch (err) {
           console.error(`Error processing Excel invoice ${file.name}:`, err);
         }
       }
+      parsedInvoices.push(...Array.from(invoiceMap.values()));
+      setBills(Array.from(billMap.values()));
 
       // Process PDF files
       if (pdfFiles.length > 0) {
