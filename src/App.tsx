@@ -1,6 +1,6 @@
 import React, { useState, useMemo, useCallback } from 'react';
 import * as XLSX from 'xlsx';
-import { Download, Loader2, Trash2, Upload, FileSpreadsheet, Receipt, DollarSign, BarChart3, Users, Play, CheckCircle2, AlertCircle, Clock, RefreshCw } from 'lucide-react';
+import { Download, Loader2, Trash2, Upload, FileSpreadsheet, Receipt, DollarSign, BarChart3, Users, Play, CheckCircle2, AlertCircle, Clock } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { processInvoiceBatch, Invoice } from './services/geminiService';
 
@@ -347,26 +347,6 @@ export default function App() {
     e.target.value = '';
   }, []);
 
-  const generateBills = () => {
-    const billMap = new Map<string, Bill>();
-    invoices.forEach(inv => {
-      const d = new Date(inv.date);
-      billMap.set(inv.invoiceNumber, {
-        id: uid(),
-        serviceMonth: String(d.getMonth() + 1).padStart(2, '0'),
-        serviceYear: String(d.getFullYear()),
-        taxID: '',
-        vendorName: inv.client,
-        description: '',
-        stayDates: '',
-        invoiceNumber: inv.invoiceNumber,
-        invoiceDate: inv.date,
-        amountGEL: Math.round(inv.amountUSD * 2.7 * 100) / 100,
-      });
-    });
-    setBills(Array.from(billMap.values()));
-  };
-
   // ============================================================
   // 3. INVOICE UPLOAD (PDF via Gemini & XLSX — APPEND)
   // ============================================================
@@ -492,15 +472,15 @@ export default function App() {
                 });
               }
             }
-            
-            parsedInvoices.push(...Array.from(invoiceMap.values()));
           }
         } catch (err) {
           console.error(`Error processing Excel invoice ${file.name}:`, err);
         }
       }
-      parsedInvoices.push(...Array.from(invoiceMap.values()));
-      setBills(Array.from(billMap.values()));
+      
+      // Move Excel data to parsedInvoices once after all files/sheets are processed
+      parsedInvoices = Array.from(invoiceMap.values());
+      setBills(prev => [...prev, ...Array.from(billMap.values())]);
 
       // Process PDF files
       if (pdfFiles.length > 0) {
@@ -888,12 +868,9 @@ export default function App() {
   }, [bills, transactions, exchangeRates]);
 
   const clearBills = () => {
-    console.log("clearBills called");
     if (confirm("დარწმუნებული ხართ, რომ გსურთ ყველა ფაქტურის წაშლა?")) {
-      console.log("Confirmed");
       setBills([]);
       setInvoices([]);
-      console.log("State cleared");
     }
   };
 
@@ -1519,12 +1496,6 @@ export default function App() {
                     className="flex items-center gap-2 px-5 py-2.5 bg-red-100 text-red-600 rounded-xl text-xs font-bold hover:bg-red-200 transition-all"
                   >
                     <Trash2 size={14} /> გასუფთავება
-                  </button>
-                  <button
-                    onClick={generateBills}
-                    className="flex items-center gap-2 px-5 py-2.5 bg-green-100 text-green-600 rounded-xl text-xs font-bold hover:bg-green-200 transition-all"
-                  >
-                    <RefreshCw size={14} /> ფაქტურების გენერირება
                   </button>
                   <button
                     onClick={updateBillsFromTransactions}
