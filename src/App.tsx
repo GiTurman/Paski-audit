@@ -474,7 +474,7 @@ export default function App() {
             }
             
             parsedInvoices.push(...Array.from(invoiceMap.values()));
-            setBills(prev => [...prev, ...Array.from(billMap.values())]);
+            setBills(Array.from(billMap.values()));
           }
         } catch (err) {
           console.error(`Error processing Excel invoice ${file.name}:`, err);
@@ -865,6 +865,12 @@ export default function App() {
     setBills(updatedBills);
     alert("ინფორმაცია განახლდა.");
   }, [bills, transactions, exchangeRates]);
+
+  const clearBills = () => {
+    if (confirm("დარწმუნებული ხართ, რომ გსურთ ყველა ფაქტურის წაშლა?")) {
+      setBills([]);
+    }
+  };
 
   const exportBillsToXLSX = () => {
     const wsData = bills.map(b => ({
@@ -1483,6 +1489,12 @@ export default function App() {
                   <button onClick={batchUpdateBills} className="px-3 py-1 bg-black text-white rounded text-xs font-bold">განახლება</button>
                 </div>
                 <div className="flex gap-2">
+                  <button
+                    onClick={clearBills}
+                    className="flex items-center gap-2 px-5 py-2.5 bg-red-100 text-red-600 rounded-xl text-xs font-bold hover:bg-red-200 transition-all"
+                  >
+                    <Trash2 size={14} /> გასუფთავება
+                  </button>
                   <button
                     onClick={updateBillsFromTransactions}
                     className="flex items-center gap-2 px-5 py-2.5 bg-gray-100 text-black rounded-xl text-xs font-bold hover:bg-gray-200 transition-all"
