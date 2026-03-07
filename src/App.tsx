@@ -7,6 +7,23 @@ import { processInvoiceBatch, Invoice } from './services/geminiService';
 // ============================================================
 // TYPES
 // ============================================================
+interface Bill {
+  id: string;
+  serviceMonth: string;
+  serviceYear: string;
+  taxID: string;
+  vendorName: string;
+  description: string;
+  stayDates: string;
+  invoiceNumber: string;
+  invoiceDate: string;
+  amountGEL: number;
+  transferDate?: string;
+  fxr?: number;
+  isEditing?: boolean;
+  isSelected?: boolean;
+}
+
 interface Transaction {
   id: string;
   date: string;
@@ -154,6 +171,7 @@ export default function App() {
   const [transactions, setTransactions] = useState<Transaction[]>([]);
   const [exchangeRates, setExchangeRates] = useState<Record<string, number>>({});
   const [invoices, setInvoices] = useState<Invoice[]>([]);
+  const [bills, setBills] = useState<Bill[]>([]);
   const [results, setResults] = useState<ReconResult[]>([]);
 
   const [isProcessing, setIsProcessing] = useState(false);
@@ -162,6 +180,8 @@ export default function App() {
   const [view, setView] = useState<'upload' | 'audit' | 'debtors'>('upload');
   const [asOfDate, setAsOfDate] = useState(new Date().toISOString().split('T')[0]);
   const [searchTerm, setSearchTerm] = useState('');
+  const [batchMonth, setBatchMonth] = useState('');
+  const [batchYear, setBatchYear] = useState('');
 
   // --- Counts for step indicators ---
   const bankCount = transactions.length;
@@ -379,9 +399,14 @@ export default function App() {
             let totalCol = keys.findIndex(k => k === 'invoice total' || k === 'თანხა');
             if (totalCol === -1) totalCol = keys.findIndex(k => k.includes('total'));
             const currCol = keys.findIndex(k => k === 'currency' || k === 'ვალუტა');
+            const taxIdCol = keys.findIndex(k => k === 'tax id');
+            const stayDatesCol = keys.findIndex(k => k === 'stay dates');
+            const transferDateCol = keys.findIndex(k => k === 'transfer date' || k === 'გადარიცხვის თარიღი');
+            const fxrCol = keys.findIndex(k => k === 'fxr' || k === 'კურსი');
 
             const startIdx = headerRowIdx + 1;
             const invoiceMap = new Map<string, Invoice>();
+            const billMap = new Map<string, Bill>();
             
             for (let r = startIdx; r < raw.length; r++) {
               const row = raw[r];
@@ -393,6 +418,10 @@ export default function App() {
               let amount = totalCol >= 0 ? parseFloat(String(row[totalCol]).replace(/,/g, '')) : NaN;
               const dateRaw = dateCol >= 0 ? row[dateCol] : '';
               let invoiceNumber = invCol >= 0 ? String(row[invCol] || '').trim() : '';
+              const taxID = taxIdCol >= 0 ? String(row[taxIdCol] || '').trim() : '';
+              const stayDates = stayDatesCol >= 0 ? String(row[stayDatesCol] || '').trim() : '';
+              const transferDate = transferDateCol >= 0 ? String(row[transferDateCol] || '').trim() : undefined;
+              const fxr = fxrCol >= 0 ? parseFloat(String(row[fxrCol] || '')) : undefined;
               
               if (!client || isNaN(amount)) continue;
               
@@ -411,8 +440,11 @@ export default function App() {
               const date = parseDate(dateRaw);
               
               let amountUSD = amount;
+              let amountGEL = amount;
               if (currency.includes('GEL') || currency === '₾') {
                 amountUSD = amount / 2.7; // Fallback estimate
+              } else {
+                amountGEL = amount * 2.7; // Fallback estimate
               }
               
               if (!invoiceMap.has(invoiceNumber)) {
@@ -422,10 +454,27 @@ export default function App() {
                   client,
                   amountUSD: Math.round(amountUSD * 100) / 100
                 });
+                
+                const d = new Date(date);
+                billMap.set(invoiceNumber, {
+                  id: uid(),
+                  serviceMonth: String(d.getMonth() + 1).padStart(2, '0'),
+                  serviceYear: String(d.getFullYear()),
+                  taxID,
+                  vendorName: client,
+                  description,
+                  stayDates,
+                  invoiceNumber,
+                  invoiceDate: date,
+                  amountGEL: Math.round(amountGEL * 100) / 100,
+                  transferDate,
+                  fxr: isNaN(fxr!) ? undefined : fxr
+                });
               }
             }
             
             parsedInvoices.push(...Array.from(invoiceMap.values()));
+            setBills(prev => [...prev, ...Array.from(billMap.values())]);
           }
         } catch (err) {
           console.error(`Error processing Excel invoice ${file.name}:`, err);
@@ -738,6 +787,105 @@ export default function App() {
     XLSX.writeFile(wb, `Paski_Debtors_${asOfDate}.xlsx`);
   }, [debtors, asOfDate]);
 
+  const toggleEditBill = (index: number) => {
+    setBills(prev => prev.map((b, i) => i === index ? { ...b, isEditing: !b.isEditing } : b));
+  };
+
+  const deleteBill = (index: number) => {
+    setBills(prev => prev.filter((_, i) => i !== index));
+  };
+
+  const updateBill = (index: number, field: keyof Bill, value: any) => {
+    setBills(prev => prev.map((b, i) => i === index ? { ...b, [field]: value } : b));
+  };
+
+  const toggleSelectBill = (index: number) => {
+    setBills(prev => prev.map((b, i) => i === index ? { ...b, isSelected: !b.isSelected } : b));
+  };
+
+  const toggleSelectAll = () => {
+    const allSelected = bills.every(b => b.isSelected);
+    setBills(prev => prev.map(b => ({ ...b, isSelected: !allSelected })));
+  };
+
+  const batchUpdateBills = () => {
+    if (!batchMonth && !batchYear) return;
+    setBills(prev => prev.map(b => {
+      if (b.isSelected) {
+        return {
+          ...b,
+          serviceMonth: batchMonth || b.serviceMonth,
+          serviceYear: batchYear || b.serviceYear,
+          isSelected: false // Deselect after update
+        };
+      }
+      return b;
+    }));
+    setBatchMonth('');
+    setBatchYear('');
+  };
+
+  const updateBillsFromTransactions = useCallback(() => {
+    if (bills.length === 0 || transactions.length === 0) {
+      alert("გთხოვთ ატვირთოთ საბანკო ამონაწერი და ინვოისები.");
+      return;
+    }
+
+    const updatedBills = bills.map(bill => {
+      const matchedTransaction = transactions.find(t => 
+        t.invoiceRefs.some(ref => ref.includes(bill.invoiceNumber)) ||
+        t.details.toLowerCase().includes(bill.invoiceNumber.toLowerCase()) ||
+        t.details2.toLowerCase().includes(bill.invoiceNumber.toLowerCase())
+      );
+
+      if (matchedTransaction) {
+        const rate = getRate(matchedTransaction.date, exchangeRates);
+        return {
+          ...bill,
+          transferDate: matchedTransaction.date,
+          fxr: rate
+        };
+      } else {
+        const year = parseInt(bill.serviceYear);
+        const month = parseInt(bill.serviceMonth);
+        // Ensure month is 1-12, otherwise fallback to current month
+        const validMonth = (month >= 1 && month <= 12) ? month : new Date().getMonth() + 1;
+        const validYear = (year >= 2000 && year <= 2100) ? year : new Date().getFullYear();
+        
+        const lastDay = new Date(validYear, validMonth, 0);
+        const dateStr = lastDay.toISOString().split('T')[0];
+        const rate = getRate(dateStr, exchangeRates);
+        return {
+          ...bill,
+          transferDate: undefined,
+          fxr: rate
+        };
+      }
+    });
+    setBills(updatedBills);
+    alert("ინფორმაცია განახლდა.");
+  }, [bills, transactions, exchangeRates]);
+
+  const exportBillsToXLSX = () => {
+    const wsData = bills.map(b => ({
+      'მომსახურების თვე': b.serviceMonth,
+      'მომსახურების წელი': b.serviceYear,
+      'Tax ID': b.taxID,
+      'Vendor Name': b.vendorName,
+      'Description': b.description,
+      'Stay Dates': b.stayDates,
+      'Invoice #': b.invoiceNumber,
+      'Invoice Date': b.invoiceDate,
+      'Amount GEL': b.amountGEL,
+      'Transfer Date': b.transferDate || '',
+      'FXR': b.fxr || ''
+    }));
+    const ws = XLSX.utils.json_to_sheet(wsData);
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, 'ა_ფატურა');
+    XLSX.writeFile(wb, 'ა_ფატურა.xlsx');
+  };
+
   // ============================================================
   // RENDER
   // ============================================================
@@ -798,6 +946,7 @@ export default function App() {
             {[
               { key: 'upload' as const, label: 'ატვირთვა', icon: Upload },
               { key: 'audit' as const, label: 'აუდიტი', icon: Receipt, count: hasResults ? results.length : undefined },
+              { key: 'bills' as const, label: 'ა/ფატურა', icon: FileSpreadsheet, count: bills.length || undefined },
               { key: 'debtors' as const, label: 'დებიტორები', icon: Users, count: debtors.length || undefined },
             ].map(tab => (
               <button
@@ -1175,6 +1324,7 @@ export default function App() {
                             <th className="p-4 text-right">ნაშთი (USD)</th>
                             <th className="p-4 text-center">სტატუსი</th>
                             <th className="p-4">კომენტარი</th>
+                            <th className="p-4"></th>
                           </tr>
                         </thead>
                         <tbody className="text-xs">
@@ -1187,10 +1337,18 @@ export default function App() {
                                 'border-gray-50'
                               }`}
                             >
-                              <td className="p-4 font-mono font-bold">{r.invoice.invoiceNumber}</td>
-                              <td className="p-4 text-gray-500 whitespace-nowrap">{r.invoice.date}</td>
-                              <td className="p-4 max-w-[180px] truncate" title={r.invoice.client}>{r.invoice.client}</td>
-                              <td className="p-4 text-right font-mono">${fmt(r.invoice.amountUSD)}</td>
+                              <td className="p-4 font-mono font-bold">
+                                {r.isEditing ? <input className="w-full border rounded px-1" value={r.invoice.invoiceNumber} onChange={(e) => updateInvoice(i, 'invoiceNumber', e.target.value)} /> : r.invoice.invoiceNumber}
+                              </td>
+                              <td className="p-4 text-gray-500 whitespace-nowrap">
+                                {r.isEditing ? <input className="w-full border rounded px-1" value={r.invoice.date} onChange={(e) => updateInvoice(i, 'date', e.target.value)} /> : r.invoice.date}
+                              </td>
+                              <td className="p-4 max-w-[180px] truncate" title={r.invoice.client}>
+                                {r.isEditing ? <input className="w-full border rounded px-1" value={r.invoice.client} onChange={(e) => updateInvoice(i, 'client', e.target.value)} /> : r.invoice.client}
+                              </td>
+                              <td className="p-4 text-right font-mono">
+                                {r.isEditing ? <input type="number" className="w-full border rounded px-1 text-right" value={r.invoice.amountUSD} onChange={(e) => updateInvoice(i, 'amountUSD', parseFloat(e.target.value))} /> : `$${fmt(r.invoice.amountUSD)}`}
+                              </td>
                               <td className="p-4 text-right font-mono font-bold text-blue-600">${fmt(r.paidUSD)}</td>
                               <td className="p-4 text-right font-mono font-bold text-red-600">
                                 {r.balanceUSD > 0 ? `$${fmt(r.balanceUSD)}` : '-'}
@@ -1198,6 +1356,11 @@ export default function App() {
                               <td className="p-4 text-center">{statusBadge(r.status)}</td>
                               <td className="p-4 text-gray-500 italic text-[11px] max-w-[300px]" title={r.comment}>
                                 {r.comment}
+                              </td>
+                              <td className="p-4">
+                                <button onClick={() => toggleEdit(i)} className="text-blue-600 font-bold text-[10px] hover:underline">
+                                  {r.isEditing ? 'შენახვა' : 'რედაქტირება'}
+                                </button>
                               </td>
                             </tr>
                           ))}
@@ -1299,6 +1462,86 @@ export default function App() {
                   )}
                 </>
               )}
+            </motion.div>
+          )}
+          {/* ============================================================ */}
+          {/* BILLS VIEW                                                    */}
+          {/* ============================================================ */}
+          {view === 'bills' && (
+            <motion.div
+              key="bills"
+              initial={{ opacity: 0, y: 10 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -10 }}
+              transition={{ duration: 0.2 }}
+            >
+              <div className="flex items-center justify-between mb-4 gap-4">
+                <h2 className="text-2xl font-black">ა/ფატურა</h2>
+                <div className="flex items-center gap-2">
+                  <input className="w-10 border rounded px-1 text-xs" placeholder="MM" value={batchMonth} onChange={(e) => setBatchMonth(e.target.value)} />
+                  <input className="w-12 border rounded px-1 text-xs" placeholder="YYYY" value={batchYear} onChange={(e) => setBatchYear(e.target.value)} />
+                  <button onClick={batchUpdateBills} className="px-3 py-1 bg-black text-white rounded text-xs font-bold">განახლება</button>
+                </div>
+                <div className="flex gap-2">
+                  <button
+                    onClick={updateBillsFromTransactions}
+                    className="flex items-center gap-2 px-5 py-2.5 bg-gray-100 text-black rounded-xl text-xs font-bold hover:bg-gray-200 transition-all"
+                  >
+                    <Clock size={14} /> განახლება
+                  </button>
+                  <button
+                    onClick={exportBillsToXLSX}
+                    className="flex items-center gap-2 px-5 py-2.5 bg-black text-white rounded-xl text-xs font-bold hover:bg-blue-600 transition-all"
+                  >
+                    <Download size={14} /> ექსელში ჩამოტვირთვა
+                  </button>
+                </div>
+              </div>
+              <div className="bg-white rounded-2xl border border-gray-100 overflow-hidden">
+                <div className="overflow-x-auto">
+                  <table className="w-full text-left">
+                    <thead className="bg-gray-50 text-[10px] uppercase font-bold text-gray-400">
+                      <tr>
+                        <th className="p-4"><input type="checkbox" onChange={toggleSelectAll} checked={bills.length > 0 && bills.every(b => b.isSelected)} /></th>
+                        <th className="p-4">თვე/წელი</th>
+                        <th className="p-4">Tax ID</th>
+                        <th className="p-4">Vendor</th>
+                        <th className="p-4">Desc</th>
+                        <th className="p-4">Dates</th>
+                        <th className="p-4">Invoice #</th>
+                        <th className="p-4">Date</th>
+                        <th className="p-4">Amount GEL</th>
+                        <th className="p-4">Transfer Date</th>
+                        <th className="p-4">FXR</th>
+                        <th className="p-4"></th>
+                      </tr>
+                    </thead>
+                    <tbody className="text-xs">
+                      {bills.map((b, i) => (
+                        <tr key={b.id} className="border-t border-gray-50 hover:bg-gray-50/50">
+                          <td className="p-4"><input type="checkbox" checked={b.isSelected || false} onChange={() => toggleSelectBill(i)} /></td>
+                          <td className="p-4">
+                            {b.isEditing ? <div className="flex gap-1"><input className="w-10 border rounded px-1" value={b.serviceMonth} onChange={(e) => updateBill(i, 'serviceMonth', e.target.value)} />/<input className="w-12 border rounded px-1" value={b.serviceYear} onChange={(e) => updateBill(i, 'serviceYear', e.target.value)} /></div> : `${b.serviceMonth}/${b.serviceYear}`}
+                          </td>
+                          <td className="p-4">{b.isEditing ? <input className="w-20 border rounded px-1" value={b.taxID} onChange={(e) => updateBill(i, 'taxID', e.target.value)} /> : b.taxID}</td>
+                          <td className="p-4">{b.isEditing ? <input className="w-24 border rounded px-1" value={b.vendorName} onChange={(e) => updateBill(i, 'vendorName', e.target.value)} /> : b.vendorName}</td>
+                          <td className="p-4">{b.isEditing ? <input className="w-24 border rounded px-1" value={b.description} onChange={(e) => updateBill(i, 'description', e.target.value)} /> : b.description}</td>
+                          <td className="p-4">{b.isEditing ? <input className="w-24 border rounded px-1" value={b.stayDates} onChange={(e) => updateBill(i, 'stayDates', e.target.value)} /> : b.stayDates}</td>
+                          <td className="p-4">{b.isEditing ? <input className="w-20 border rounded px-1" value={b.invoiceNumber} onChange={(e) => updateBill(i, 'invoiceNumber', e.target.value)} /> : b.invoiceNumber}</td>
+                          <td className="p-4">{b.isEditing ? <input className="w-20 border rounded px-1" value={b.invoiceDate} onChange={(e) => updateBill(i, 'invoiceDate', e.target.value)} /> : b.invoiceDate}</td>
+                          <td className="p-4">{b.isEditing ? <input type="number" className="w-20 border rounded px-1" value={b.amountGEL} onChange={(e) => updateBill(i, 'amountGEL', parseFloat(e.target.value))} /> : fmt(b.amountGEL)}</td>
+                          <td className="p-4">{b.isEditing ? <input className="w-20 border rounded px-1" value={b.transferDate || ''} onChange={(e) => updateBill(i, 'transferDate', e.target.value)} /> : b.transferDate || '-'}</td>
+                          <td className="p-4">{b.isEditing ? <input type="number" className="w-16 border rounded px-1" value={b.fxr || ''} onChange={(e) => updateBill(i, 'fxr', parseFloat(e.target.value))} /> : b.fxr || '-'}</td>
+                          <td className="p-4 flex gap-2">
+                            <button onClick={() => toggleEditBill(i)} className="text-blue-600 font-bold hover:underline">{b.isEditing ? 'შენახვა' : 'ედით'}</button>
+                            <button onClick={() => deleteBill(i)} className="text-red-600 font-bold hover:underline">წაშლა</button>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
             </motion.div>
           )}
         </AnimatePresence>
