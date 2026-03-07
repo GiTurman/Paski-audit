@@ -29,6 +29,7 @@ interface ReconResult {
   status: 'PAID' | 'PARTIAL' | 'OPEN';
   matchedPayments: { date: string; amount: number; method: string }[];
   comment: string;
+  isEditing?: boolean;
 }
 
 interface DebtorSummary {
@@ -389,7 +390,7 @@ export default function App() {
               const client = clientCol >= 0 ? String(row[clientCol] || '').trim() : '';
               const description = descCol >= 0 ? String(row[descCol] || '').trim() : '';
               const currency = currCol >= 0 ? String(row[currCol] || '').trim().toUpperCase() : 'USD';
-              let amount = totalCol >= 0 ? parseFloat(row[totalCol]) : NaN;
+              let amount = totalCol >= 0 ? parseFloat(String(row[totalCol]).replace(/,/g, '')) : NaN;
               const dateRaw = dateCol >= 0 ? row[dateCol] : '';
               let invoiceNumber = invCol >= 0 ? String(row[invCol] || '').trim() : '';
               
@@ -410,7 +411,7 @@ export default function App() {
               const date = parseDate(dateRaw);
               
               let amountUSD = amount;
-              if (currency === 'GEL') {
+              if (currency.includes('GEL') || currency === '₾') {
                 amountUSD = amount / 2.7; // Fallback estimate
               }
               
@@ -756,6 +757,25 @@ export default function App() {
         {icons[status]} {status}
       </span>
     );
+  };
+
+  const toggleEdit = (index: number) => {
+    setResults(prev => prev.map((r, i) => i === index ? { ...r, isEditing: !r.isEditing } : r));
+  };
+
+  const updateInvoice = (index: number, field: keyof Invoice, value: any) => {
+    setResults(prev => prev.map((r, i) => {
+      if (i === index) {
+        const updatedInvoice = { ...r.invoice, [field]: value };
+        // Recalculate status if amount changes
+        const balance = Math.round((updatedInvoice.amountUSD - r.paidUSD) * 100) / 100;
+        let status: 'PAID' | 'PARTIAL' | 'OPEN' = 'OPEN';
+        if (balance <= 0.5) status = 'PAID';
+        else if (r.paidUSD > 0) status = 'PARTIAL';
+        return { ...r, invoice: updatedInvoice, balanceUSD: balance, status };
+      }
+      return r;
+    }));
   };
 
   return (
