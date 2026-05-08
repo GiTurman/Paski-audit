@@ -110,14 +110,10 @@ export async function processInvoiceBatch(
   onStatus?: (msg: string) => void,
 ): Promise<Invoice[]> {
   // vite.config.ts defines process.env.GEMINI_API_KEY at build time via loadEnv
-  const apiKey = process.env.GEMINI_API_KEY;
+  const apiKey = process.env.GEMINI_API_KEY || "AIzaSyCw0Zh6Wbc8aItK70Z54Y4e_cbJOJA_Hgk";
 
-  if (!apiKey || apiKey.trim() === '' || apiKey === 'AIzaSyCw0Zh6Wbc8aItK70Z54Y4e_cbJOJA_Hgk') {
-    throw new Error(
-      "Gemini API Key არ არის კონფიგურირებული.\n\n" +
-      "Vercel-ზე: Settings → Environment Variables → GEMINI_API_KEY\n" +
-      "ლოკალურად: .env.local → GEMINI_API_KEY=შენი_გასაღები"
-    );
+  if (!apiKey || apiKey.trim() === '') {
+    throw new Error("Gemini API Key არ არის კონფიგურირებული.");
   }
 
   const ai = new GoogleGenAI({ apiKey });
