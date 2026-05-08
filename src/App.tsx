@@ -177,7 +177,7 @@ export default function App() {
   const [isProcessing, setIsProcessing] = useState(false);
   const [progress, setProgress] = useState(0);
   const [progressLabel, setProgressLabel] = useState('');
-  const [view, setView] = useState<'upload' | 'audit' | 'debtors'>('upload');
+  const [view, setView] = useState<'upload' | 'audit' | 'bills' | 'debtors'>('upload');
   const [asOfDate, setAsOfDate] = useState(new Date().toISOString().split('T')[0]);
   const [searchTerm, setSearchTerm] = useState('');
   const [batchMonth, setBatchMonth] = useState('');

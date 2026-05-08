@@ -36,25 +36,25 @@ Important:
 - Return an array of objects, even if only one invoice is found.`;
 
 // --- Rate limit configuration ---
-const BATCH_SIZE = 2;           // PDFs per API call (small = fewer tokens = less likely to hit limit)
-const BASE_DELAY_MS = 4000;     // 4 sec between batches (free tier: ~15 RPM)
-const MAX_RETRIES = 3;          // Retry up to 3 times on 429
-const BACKOFF_MULTIPLIER = 2;   // Double wait time each retry
+const BATCH_SIZE = 2;
+const BASE_DELAY_MS = 4000;
+const MAX_RETRIES = 3;
+const BACKOFF_MULTIPLIER = 2;
 
-/** Sleep helper */
+// FIX: gemini-3-flash-preview does not exist. Use the correct model name.
+const MODEL = "gemini-2.0-flash";
+
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
 
-/** Single API call with retry logic */
 async function callWithRetry(
   ai: GoogleGenAI,
-  model: string,
   parts: any[],
   retries = MAX_RETRIES
 ): Promise<Invoice[]> {
   for (let attempt = 0; attempt <= retries; attempt++) {
     try {
       const response = await ai.models.generateContent({
-        model,
+        model: MODEL,
         contents: [
           {
             parts: [
@@ -71,18 +71,24 @@ async function callWithRetry(
 
       if (response.text) {
         const parsed = JSON.parse(response.text) as Invoice[];
-        return parsed.filter(inv => inv.amountUSD > 0 && inv.invoiceNumber).map(inv => ({
-          invoiceNumber: inv.invoiceNumber.trim(),
-          date: inv.date || '',
-          client: inv.client?.trim() || 'Unknown',
-          amountUSD: Math.round(inv.amountUSD * 100) / 100,
-        }));
+        return parsed
+          .filter(inv => inv.amountUSD > 0 && inv.invoiceNumber)
+          .map(inv => ({
+            invoiceNumber: inv.invoiceNumber.trim(),
+            date: inv.date || '',
+            client: inv.client?.trim() || 'Unknown',
+            amountUSD: Math.round(inv.amountUSD * 100) / 100,
+          }));
       }
       return [];
     } catch (err: any) {
       const status = err?.status || err?.httpErrorCode || err?.error?.code;
       const msg = err?.message || JSON.stringify(err);
-      const isRateLimit = status === 429 || msg.includes('429') || msg.includes('RESOURCE_EXHAUSTED') || msg.includes('quota');
+      const isRateLimit =
+        status === 429 ||
+        msg.includes('429') ||
+        msg.includes('RESOURCE_EXHAUSTED') ||
+        msg.includes('quota');
 
       if (isRateLimit && attempt < retries) {
         const waitTime = BASE_DELAY_MS * Math.pow(BACKOFF_MULTIPLIER, attempt + 1);
@@ -103,17 +109,18 @@ export async function processInvoiceBatch(
   onProgress?: (progress: number) => void,
   onStatus?: (msg: string) => void,
 ): Promise<Invoice[]> {
-  // ვიყენებთ მომხმარებლის მიერ მოწოდებულ გასაღებს
-  const apiKey = (process.env.GEMINI_API_KEY && process.env.GEMINI_API_KEY !== 'MY_GEMINI_API_KEY') 
-    ? process.env.GEMINI_API_KEY 
-    : "AIzaSyCM0xMPcxFyH-4CEJFqBjurAUYK-W6xT6M";
+  // vite.config.ts defines process.env.GEMINI_API_KEY at build time via loadEnv
+  const apiKey = process.env.GEMINI_API_KEY;
 
-  if (!apiKey || apiKey.trim() === '') {
-    throw new Error("Gemini API Key არ არის კონფიგურირებული.");
+  if (!apiKey || apiKey.trim() === '' || apiKey === 'MY_GEMINI_API_KEY') {
+    throw new Error(
+      "Gemini API Key არ არის კონფიგურირებული.\n\n" +
+      "Vercel-ზე: Settings → Environment Variables → GEMINI_API_KEY\n" +
+      "ლოკალურად: .env.local → GEMINI_API_KEY=შენი_გასაღები"
+    );
   }
 
   const ai = new GoogleGenAI({ apiKey });
-  const model = "gemini-3-flash-preview"; // ვიყენებთ უახლეს მოდელს
   const results: Invoice[] = [];
   const errors: string[] = [];
   const total = files.length;
@@ -139,20 +146,17 @@ export async function processInvoiceBatch(
         })
       );
 
-      const parsed = await callWithRetry(ai, model, parts);
+      const parsed = await callWithRetry(ai, parts);
       results.push(...parsed);
-
     } catch (err: any) {
       const msg = err?.message || String(err);
       console.error(`❌ ${batchNames}: ${msg}`);
       errors.push(batchNames);
-      // Continue — don't stop everything for one failed batch
     }
 
     const processed = Math.min(i + batch.length, total);
     onProgress?.(Math.round((processed / total) * 100));
 
-    // Delay between batches to stay within rate limits
     if (i + BATCH_SIZE < total) {
       onStatus?.(`⏳ ${BASE_DELAY_MS / 1000}წ ლოდინი (rate limit)...`);
       await sleep(BASE_DELAY_MS);
