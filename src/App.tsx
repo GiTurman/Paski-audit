@@ -163,6 +163,21 @@ const fmt = (n: number, dec = 2) => n.toFixed(dec).replace(/\B(?=(\d{3})+(?!\d))
 let _idCounter = 0;
 const uid = () => `tx_${Date.now()}_${++_idCounter}`;
 
+/** Escape a string for safe use inside a RegExp */
+const escapeRegExp = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+/**
+ * Generic company/legal tokens that must NOT drive a client-name match on their
+ * own — otherwise one shared word ("შპს", "travel") cross-allocates payments
+ * between unrelated clients.
+ */
+const GENERIC_TOKENS = new Set([
+  'შპს', 'სს', 'ააიპ', 'კს', 'ი/მ',
+  'ltd', 'llc', 'inc', 'co', 'corp', 'group', 'company',
+  'tour', 'tours', 'travel', 'agency', 'service', 'services',
+  'hotel', 'hotels', 'georgia', 'საქართველო', 'tbilisi', 'თბილისი',
+]);
+
 // ============================================================
 // MAIN APP
 // ============================================================
@@ -556,61 +571,64 @@ export default function App() {
     // Step 3: Create mutable payment pool
     const pool = converted.map(t => ({ ...t, remaining: t.amountUSD }));
 
-    // Step 4: Three-pass matching
-    const reconResults: ReconResult[] = sortedInvoices.map(inv => {
-      let paid = 0;
-      const matched: { date: string; amount: number; method: string }[] = [];
+    // Step 4: Two-pass matching.
+    // Passes run GLOBALLY (all invoices) in priority order so that the strong
+    // signal (exact invoice number) always wins the payment before the weaker
+    // client-name signal can claim it for a different invoice.
+    type Acc = { paid: number; matched: { date: string; amount: number; method: string }[] };
+    const acc = new Map<Invoice, Acc>();
+    sortedInvoices.forEach(inv => acc.set(inv, { paid: 0, matched: [] }));
+
+    // --- Pass 1: Exact Invoice Number Match (global, highest priority) ---
+    sortedInvoices.forEach(inv => {
+      const a = acc.get(inv)!;
       const invNum = (inv.invoiceNumber || '').trim().toLowerCase();
+      if (!invNum || invNum.length < 4) return;
+      // Word-boundary match so "070201" does not match "0702010" or "1070201".
+      const re = new RegExp(`(?<![\\w])${escapeRegExp(invNum)}(?![\\w])`, 'i');
 
-      // --- Pass 1: Invoice Number Match ---
-      if (invNum && invNum.length >= 4) {
-        pool.forEach(t => {
-          if (t.remaining <= 0) return;
-          const hasRef = t.invoiceRefs.some(ref => ref.includes(invNum) || invNum.includes(ref));
-          const inDetails = t.details.toLowerCase().includes(invNum) || t.details2.toLowerCase().includes(invNum);
-
-          if (hasRef || inDetails) {
-            const take = Math.min(t.remaining, inv.amountUSD - paid);
-            if (take > 0) {
-              paid += take;
-              t.remaining -= take;
-              matched.push({ date: t.date, amount: take, method: `ნომრით: ${inv.invoiceNumber}` });
-            }
+      pool.forEach(t => {
+        if (t.remaining <= 0 || a.paid >= inv.amountUSD) return;
+        const hasRef = t.invoiceRefs.some(ref => ref.toLowerCase() === invNum);
+        const inDetails = re.test(t.details) || re.test(t.details2);
+        if (hasRef || inDetails) {
+          const take = Math.min(t.remaining, inv.amountUSD - a.paid);
+          if (take > 0) {
+            a.paid += take;
+            t.remaining -= take;
+            a.matched.push({ date: t.date, amount: take, method: `ნომრით: ${inv.invoiceNumber}` });
           }
-        });
-      }
+        }
+      });
+    });
 
-      // --- Pass 2: Client Name / ID Match ---
-      if (paid < inv.amountUSD && inv.client) {
-        const clientLower = inv.client.toLowerCase().trim();
-        // Take first meaningful word (at least 4 chars)
-        const clientWords = clientLower.split(/\s+/).filter(w => w.length >= 4);
+    // --- Pass 2: Client Name Match (global, only invoices still open) ---
+    sortedInvoices.forEach(inv => {
+      const a = acc.get(inv)!;
+      if (a.paid >= inv.amountUSD || !inv.client) return;
+      // Significant tokens only: ≥4 chars and not a generic legal/industry word.
+      const tokens = inv.client.toLowerCase().trim().split(/\s+/)
+        .filter(w => w.length >= 4 && !GENERIC_TOKENS.has(w));
+      // No distinctive token → leave OPEN rather than risk a false allocation.
+      if (tokens.length === 0) return;
 
-        pool.forEach(t => {
-          if (t.remaining <= 0 || paid >= inv.amountUSD) return;
-          const companyLower = t.company.toLowerCase();
-          const detailsLower = `${t.details} ${t.details2}`.toLowerCase();
-
-          const nameMatch = clientWords.some(w => companyLower.includes(w) || detailsLower.includes(w));
-
-          if (nameMatch) {
-            const take = Math.min(t.remaining, inv.amountUSD - paid);
-            if (take > 0) {
-              paid += take;
-              t.remaining -= take;
-              matched.push({ date: t.date, amount: take, method: `კლიენტით: ${inv.client}` });
-            }
+      pool.forEach(t => {
+        if (t.remaining <= 0 || a.paid >= inv.amountUSD) return;
+        const hay = `${t.company} ${t.details} ${t.details2}`.toLowerCase();
+        if (tokens.some(w => hay.includes(w))) {
+          const take = Math.min(t.remaining, inv.amountUSD - a.paid);
+          if (take > 0) {
+            a.paid += take;
+            t.remaining -= take;
+            a.matched.push({ date: t.date, amount: take, method: `კლიენტით: ${inv.client}` });
           }
-        });
-      }
+        }
+      });
+    });
 
-      // --- Pass 3: FIFO for unmatched ---
-      // Note: FIFO only for remaining amount — skip if already fully paid
-      if (paid < inv.amountUSD * 0.5 && paid === 0) {
-        // Only use FIFO if zero direct matches found
-        // This prevents incorrect allocation
-        // We leave it OPEN instead of falsely matching
-      }
+    // --- Build results ---
+    const reconResults: ReconResult[] = sortedInvoices.map(inv => {
+      const { paid, matched } = acc.get(inv)!;
 
       // Calculate balance and status
       const balance = Math.round((inv.amountUSD - paid) * 100) / 100;
@@ -623,8 +641,11 @@ export default function App() {
       if (matched.length > 0) {
         const methods = [...new Set(matched.map(m => m.method))];
         comment = methods.join(' | ');
-        if (status === 'PAID' && Math.abs(balance) > 0.01) {
-          comment += ` | FX სხვაობა: $${Math.abs(balance).toFixed(2)}`;
+        if (status === 'PAID' && balance > 0.01) {
+          comment += ` | FX სხვაობა: $${balance.toFixed(2)}`;
+        }
+        if (balance < -0.5) {
+          comment += ` | ⚠️ ზედმეტად გადახდილი: $${Math.abs(balance).toFixed(2)}`;
         }
       } else {
         comment = '❌ გადახდა არ მოიძებნა — საჭიროებს გადამოწმებას';
@@ -1080,7 +1101,7 @@ export default function App() {
               {/* Step Cards */}
               <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
                 {/* --- BANK --- */}
-                <div className={`relative p-6 rounded-2xl border-2 transition-all ${
+                <div className={`order-2 relative p-6 rounded-2xl border-2 transition-all ${
                   bankCount > 0 ? 'border-emerald-200 bg-emerald-50/30' : 'border-dashed border-gray-200 bg-white'
                 }`}>
                   <div className="flex items-start justify-between mb-4">
@@ -1088,7 +1109,7 @@ export default function App() {
                       <div className={`w-8 h-8 rounded-lg flex items-center justify-center text-sm font-black ${
                         bankCount > 0 ? 'bg-emerald-500 text-white' : 'bg-gray-100 text-gray-400'
                       }`}>
-                        {bankCount > 0 ? <CheckCircle2 size={16} /> : '1'}
+                        {bankCount > 0 ? <CheckCircle2 size={16} /> : '2'}
                       </div>
                       <div>
                         <h3 className="text-sm font-bold">საბანკო ამონაწერი</h3>
@@ -1139,7 +1160,7 @@ export default function App() {
                 </div>
 
                 {/* --- RATES --- */}
-                <div className={`relative p-6 rounded-2xl border-2 transition-all ${
+                <div className={`order-3 relative p-6 rounded-2xl border-2 transition-all ${
                   rateCount > 0 ? 'border-blue-200 bg-blue-50/30' : 'border-dashed border-gray-200 bg-white'
                 }`}>
                   <div className="flex items-start justify-between mb-4">
@@ -1147,7 +1168,7 @@ export default function App() {
                       <div className={`w-8 h-8 rounded-lg flex items-center justify-center text-sm font-black ${
                         rateCount > 0 ? 'bg-blue-500 text-white' : 'bg-gray-100 text-gray-400'
                       }`}>
-                        {rateCount > 0 ? <CheckCircle2 size={16} /> : '2'}
+                        {rateCount > 0 ? <CheckCircle2 size={16} /> : '3'}
                       </div>
                       <div>
                         <h3 className="text-sm font-bold">ვალუტის კურსები</h3>
@@ -1190,7 +1211,7 @@ export default function App() {
                 </div>
 
                 {/* --- INVOICES --- */}
-                <div className={`relative p-6 rounded-2xl border-2 transition-all ${
+                <div className={`order-1 relative p-6 rounded-2xl border-2 transition-all ${
                   invoiceCount > 0 ? 'border-purple-200 bg-purple-50/30' : 'border-dashed border-gray-200 bg-white'
                 }`}>
                   <div className="flex items-start justify-between mb-4">
@@ -1198,7 +1219,7 @@ export default function App() {
                       <div className={`w-8 h-8 rounded-lg flex items-center justify-center text-sm font-black ${
                         invoiceCount > 0 ? 'bg-purple-500 text-white' : 'bg-gray-100 text-gray-400'
                       }`}>
-                        {invoiceCount > 0 ? <CheckCircle2 size={16} /> : '3'}
+                        {invoiceCount > 0 ? <CheckCircle2 size={16} /> : '1'}
                       </div>
                       <div>
                         <h3 className="text-sm font-bold">ინვოისები</h3>
@@ -1268,26 +1289,26 @@ export default function App() {
                   <h4 className="text-sm font-bold text-gray-500">შაბლონები გადმოსაწერად</h4>
                 </div>
                 <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-                  <button 
+                  <button
+                    onClick={() => downloadTemplate('invoices')}
+                    className="flex flex-col items-center p-4 bg-white rounded-2xl border border-gray-100 hover:border-blue-200 hover:shadow-xl transition-all group"
+                  >
+                    <Receipt className="text-gray-300 group-hover:text-purple-500 mb-2 transition-colors" size={24} />
+                    <span className="text-[10px] font-bold text-gray-400 group-hover:text-gray-600 uppercase tracking-tighter">ინვოისები (XLSX)</span>
+                  </button>
+                  <button
                     onClick={() => downloadTemplate('bank')}
                     className="flex flex-col items-center p-4 bg-white rounded-2xl border border-gray-100 hover:border-blue-200 hover:shadow-xl transition-all group"
                   >
                     <FileSpreadsheet className="text-gray-300 group-hover:text-emerald-500 mb-2 transition-colors" size={24} />
                     <span className="text-[10px] font-bold text-gray-400 group-hover:text-gray-600 uppercase tracking-tighter">საბანკო ამონაწერი</span>
                   </button>
-                  <button 
+                  <button
                     onClick={() => downloadTemplate('rates')}
                     className="flex flex-col items-center p-4 bg-white rounded-2xl border border-gray-100 hover:border-blue-200 hover:shadow-xl transition-all group"
                   >
                     <DollarSign className="text-gray-300 group-hover:text-blue-500 mb-2 transition-colors" size={24} />
                     <span className="text-[10px] font-bold text-gray-400 group-hover:text-gray-600 uppercase tracking-tighter">ვალუტის კურსები</span>
-                  </button>
-                  <button 
-                    onClick={() => downloadTemplate('invoices')}
-                    className="flex flex-col items-center p-4 bg-white rounded-2xl border border-gray-100 hover:border-blue-200 hover:shadow-xl transition-all group"
-                  >
-                    <Receipt className="text-gray-300 group-hover:text-purple-500 mb-2 transition-colors" size={24} />
-                    <span className="text-[10px] font-bold text-gray-400 group-hover:text-gray-600 uppercase tracking-tighter">ინვოისები (XLSX)</span>
                   </button>
                 </div>
                 <p className="mt-6 text-[9px] text-center text-gray-400 leading-relaxed">
