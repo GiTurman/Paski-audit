@@ -238,6 +238,7 @@ export default function App() {
     setProgressLabel('საბანკო ამონაწერების დამუშავება...');
 
     const allNew: Transaction[] = [];
+    const diagnostics: string[] = [];
 
     for (let i = 0; i < files.length; i++) {
       const file = files[i];
@@ -262,7 +263,10 @@ export default function App() {
           const detailsCol = findCol('Details', 'Description', 'დეტალები', 'დანიშნულება', 'ოპერაციის შინაარსი');
           const details2Col = findCol('Details 2', 'Details2', 'დეტალები 2');
 
-          if (!dateCol || !amountCol) continue;
+          if (!dateCol || !amountCol) {
+            diagnostics.push(`• ${file.name} [${sheetName}]: ვერ მოიძებნა ${!dateCol ? 'თარიღის' : ''}${!dateCol && !amountCol ? ' და ' : ''}${!amountCol ? 'თანხის' : ''} სვეტი.\n   ნაპოვნი სვეტები: ${keys.join(' | ')}`);
+            continue;
+          }
 
           json.forEach(row => {
             const rawDate = row[dateCol!];
@@ -304,6 +308,7 @@ export default function App() {
         }
       } catch (err) {
         console.error(`Error processing ${file.name}:`, err);
+        diagnostics.push(`• ${file.name}: წაკითხვის შეცდომა — ${(err as any)?.message || err}`);
       }
       setProgress(Math.round(((i + 1) / files.length) * 100));
     }
@@ -313,6 +318,12 @@ export default function App() {
     setProgress(0);
     setProgressLabel('');
     e.target.value = '';
+
+    if (allNew.length === 0) {
+      alert(`საბანკო ამონაწერიდან ვერცერთი ტრანზაქცია ვერ ჩაიტვირთა.\n\n${diagnostics.join('\n') || 'ფაილი ცარიელია ან ფორმატი არ იცნობა.'}`);
+    } else if (diagnostics.length > 0) {
+      alert(`ჩაიტვირთა ${allNew.length} ტრანზაქცია, თუმცა ნაწილი გამოტოვდა:\n\n${diagnostics.join('\n')}`);
+    }
   }, []);
 
   // ============================================================
@@ -324,6 +335,7 @@ export default function App() {
 
     const newRates: Record<string, number> = {};
     let count = 0;
+    const diagnostics: string[] = [];
 
     for (let i = 0; i < files.length; i++) {
       const file = files[i];
@@ -379,11 +391,16 @@ export default function App() {
         }
       } catch (err) {
         console.error(`Error processing rates from ${file.name}:`, err);
+        diagnostics.push(`• ${file.name}: წაკითხვის შეცდომა — ${(err as any)?.message || err}`);
       }
     }
 
     setExchangeRates(prev => ({ ...prev, ...newRates }));
     e.target.value = '';
+
+    if (count === 0) {
+      alert(`ვალუტის კურსები ვერ ჩაიტვირთა.\n\n${diagnostics.join('\n') || 'ფაილში ვერ მოიძებნა თარიღისა და კურსის სვეტები (მაგ. "Date" + "USD"), ან ცარიელია.'}`);
+    }
   }, []);
 
   // ============================================================
@@ -537,15 +554,22 @@ export default function App() {
       }
 
       setInvoices(prev => [...prev, ...parsedInvoices]);
+
+      if (parsedInvoices.length === 0) {
+        if (pdfFiles.length === 0 && excelFiles.length === 0) {
+          alert("ფაილის ფორმატი არ იცნობა. ატვირთეთ PDF, XLSX, XLS ან CSV.");
+        } else if (excelFiles.length > 0) {
+          alert("ინვოისები ვერ ამოიკითხა Excel/CSV ფაილიდან.\n\nდარწმუნდით, რომ ფაილში არის სვეტები: \"Vendor Name\" (ან \"კლიენტი\"), \"Invoice #\" და \"Invoice Total\" (ან \"თანხა\"). გადმოწერეთ შაბლონი ნიმუშისთვის.");
+        }
+      }
     } catch (error: any) {
       console.error("Error processing invoices:", error);
       const msg = error?.message || String(error);
       if (msg.includes('API Key') || msg.includes('apiKey') || msg.includes('კონფიგურირებული')) {
-        alert("⚠️ Gemini API Key არ არის კონფიგურირებული!\n\n" +
-          "1. გახსენით AI Studio-ში Secrets პანელი (🔑 ხატულა)\n" +
-          "2. დაამატეთ: GEMINI_API_KEY = თქვენი_გასაღები\n" +
-          "3. გასაღების მისაღებად: aistudio.google.com → Get API key\n" +
-          "4. გადატვირთეთ აპი და თავიდან სცადეთ.");
+        alert("⚠️ Gemini API Key არ არის მითითებული (PDF-ის წასაკითხად)!\n\n" +
+          "1. ინვოისების ბარათში ჩაწერეთ Gemini API Key ველში\n" +
+          "2. გასაღების მისაღებად: aistudio.google.com/app/apikey\n" +
+          "3. ან ატვირთეთ ინვოისები Excel/CSV ფორმატში (გასაღები არ სჭირდება).");
       } else {
         alert(`შეცდომა ინვოისების დამუშავებისას:\n${msg}`);
       }
