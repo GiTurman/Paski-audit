@@ -156,12 +156,44 @@ const getRate = (date: string, rates: Record<string, number>): number => {
   return 0;
 };
 
+/** Last day (YYYY-MM-DD) of an operational month given as "YYYY-MM". */
+const monthEndDate = (operationalMonth: string): string => {
+  if (!operationalMonth) return '';
+  const [y, m] = operationalMonth.split('-').map(Number);
+  if (!y || !m) return '';
+  const d = new Date(y, m, 0); // day 0 of next month = last day of month m (1-based)
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+};
+
+/**
+ * Pick the date whose FX rate should convert a transfer, per the operational-month rule:
+ * - transfer on/before the operational month end → the transfer date itself
+ * - transfer after the operational month end (next month+) → the month-end date
+ */
+const rateDateFor = (transferDate: string, opMonthEnd: string): string =>
+  (opMonthEnd && transferDate && transferDate > opMonthEnd) ? opMonthEnd : transferDate;
+
 /** Format number with commas */
 const fmt = (n: number, dec = 2) => n.toFixed(dec).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
 
 /** Generate unique ID */
 let _idCounter = 0;
 const uid = () => `tx_${Date.now()}_${++_idCounter}`;
+
+/** Escape a string for safe use inside a RegExp */
+const escapeRegExp = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+/**
+ * Generic company/legal tokens that must NOT drive a client-name match on their
+ * own — otherwise one shared word ("შპს", "travel") cross-allocates payments
+ * between unrelated clients.
+ */
+const GENERIC_TOKENS = new Set([
+  'შპს', 'სს', 'ააიპ', 'კს', 'ი/მ',
+  'ltd', 'llc', 'inc', 'co', 'corp', 'group', 'company',
+  'tour', 'tours', 'travel', 'agency', 'service', 'services',
+  'hotel', 'hotels', 'georgia', 'საქართველო', 'tbilisi', 'თბილისი',
+]);
 
 // ============================================================
 // MAIN APP
@@ -182,12 +214,19 @@ export default function App() {
   const [searchTerm, setSearchTerm] = useState('');
   const [batchMonth, setBatchMonth] = useState('');
   const [batchYear, setBatchYear] = useState('');
+  // Operational month ("YYYY-MM") — drives the FX conversion-date rule.
+  const [operationalMonth, setOperationalMonth] = useState(new Date().toISOString().slice(0, 7));
+  // Gemini API key for PDF parsing — kept in the browser only, never in source.
+  const [geminiKey, setGeminiKey] = useState(() => {
+    try { return localStorage.getItem('gemini_api_key') || ''; } catch { return ''; }
+  });
 
   // --- Counts for step indicators ---
   const bankCount = transactions.length;
   const rateCount = Object.keys(exchangeRates).length;
   const invoiceCount = invoices.length;
   const hasResults = results.length > 0;
+  const opMonthEnd = useMemo(() => monthEndDate(operationalMonth), [operationalMonth]);
 
   // ============================================================
   // 1. BANK UPLOAD (APPEND - multiple files)
@@ -199,6 +238,7 @@ export default function App() {
     setProgressLabel('საბანკო ამონაწერების დამუშავება...');
 
     const allNew: Transaction[] = [];
+    const diagnostics: string[] = [];
 
     for (let i = 0; i < files.length; i++) {
       const file = files[i];
@@ -223,7 +263,10 @@ export default function App() {
           const detailsCol = findCol('Details', 'Description', 'დეტალები', 'დანიშნულება', 'ოპერაციის შინაარსი');
           const details2Col = findCol('Details 2', 'Details2', 'დეტალები 2');
 
-          if (!dateCol || !amountCol) continue;
+          if (!dateCol || !amountCol) {
+            diagnostics.push(`• ${file.name} [${sheetName}]: ვერ მოიძებნა ${!dateCol ? 'თარიღის' : ''}${!dateCol && !amountCol ? ' და ' : ''}${!amountCol ? 'თანხის' : ''} სვეტი.\n   ნაპოვნი სვეტები: ${keys.join(' | ')}`);
+            continue;
+          }
 
           json.forEach(row => {
             const rawDate = row[dateCol!];
@@ -265,6 +308,7 @@ export default function App() {
         }
       } catch (err) {
         console.error(`Error processing ${file.name}:`, err);
+        diagnostics.push(`• ${file.name}: წაკითხვის შეცდომა — ${(err as any)?.message || err}`);
       }
       setProgress(Math.round(((i + 1) / files.length) * 100));
     }
@@ -274,6 +318,12 @@ export default function App() {
     setProgress(0);
     setProgressLabel('');
     e.target.value = '';
+
+    if (allNew.length === 0) {
+      alert(`საბანკო ამონაწერიდან ვერცერთი ტრანზაქცია ვერ ჩაიტვირთა.\n\n${diagnostics.join('\n') || 'ფაილი ცარიელია ან ფორმატი არ იცნობა.'}`);
+    } else if (diagnostics.length > 0) {
+      alert(`ჩაიტვირთა ${allNew.length} ტრანზაქცია, თუმცა ნაწილი გამოტოვდა:\n\n${diagnostics.join('\n')}`);
+    }
   }, []);
 
   // ============================================================
@@ -285,6 +335,7 @@ export default function App() {
 
     const newRates: Record<string, number> = {};
     let count = 0;
+    const diagnostics: string[] = [];
 
     for (let i = 0; i < files.length; i++) {
       const file = files[i];
@@ -340,11 +391,16 @@ export default function App() {
         }
       } catch (err) {
         console.error(`Error processing rates from ${file.name}:`, err);
+        diagnostics.push(`• ${file.name}: წაკითხვის შეცდომა — ${(err as any)?.message || err}`);
       }
     }
 
     setExchangeRates(prev => ({ ...prev, ...newRates }));
     e.target.value = '';
+
+    if (count === 0) {
+      alert(`ვალუტის კურსები ვერ ჩაიტვირთა.\n\n${diagnostics.join('\n') || 'ფაილში ვერ მოიძებნა თარიღისა და კურსის სვეტები (მაგ. "Date" + "USD"), ან ცარიელია.'}`);
+    }
   }, []);
 
   // ============================================================
@@ -491,21 +547,29 @@ export default function App() {
           },
           (statusMsg) => {
             setProgressLabel(statusMsg);
-          }
+          },
+          geminiKey
         );
         parsedInvoices = [...parsedInvoices, ...pdfParsed];
       }
 
       setInvoices(prev => [...prev, ...parsedInvoices]);
+
+      if (parsedInvoices.length === 0) {
+        if (pdfFiles.length === 0 && excelFiles.length === 0) {
+          alert("ფაილის ფორმატი არ იცნობა. ატვირთეთ PDF, XLSX, XLS ან CSV.");
+        } else if (excelFiles.length > 0) {
+          alert("ინვოისები ვერ ამოიკითხა Excel/CSV ფაილიდან.\n\nდარწმუნდით, რომ ფაილში არის სვეტები: \"Vendor Name\" (ან \"კლიენტი\"), \"Invoice #\" და \"Invoice Total\" (ან \"თანხა\"). გადმოწერეთ შაბლონი ნიმუშისთვის.");
+        }
+      }
     } catch (error: any) {
       console.error("Error processing invoices:", error);
       const msg = error?.message || String(error);
       if (msg.includes('API Key') || msg.includes('apiKey') || msg.includes('კონფიგურირებული')) {
-        alert("⚠️ Gemini API Key არ არის კონფიგურირებული!\n\n" +
-          "1. გახსენით AI Studio-ში Secrets პანელი (🔑 ხატულა)\n" +
-          "2. დაამატეთ: GEMINI_API_KEY = თქვენი_გასაღები\n" +
-          "3. გასაღების მისაღებად: aistudio.google.com → Get API key\n" +
-          "4. გადატვირთეთ აპი და თავიდან სცადეთ.");
+        alert("⚠️ Gemini API Key არ არის მითითებული (PDF-ის წასაკითხად)!\n\n" +
+          "1. ინვოისების ბარათში ჩაწერეთ Gemini API Key ველში\n" +
+          "2. გასაღების მისაღებად: aistudio.google.com/app/apikey\n" +
+          "3. ან ატვირთეთ ინვოისები Excel/CSV ფორმატში (გასაღები არ სჭირდება).");
       } else {
         alert(`შეცდომა ინვოისების დამუშავებისას:\n${msg}`);
       }
@@ -515,7 +579,7 @@ export default function App() {
       setProgressLabel('');
       e.target.value = '';
     }
-  }, []);
+  }, [geminiKey]);
 
   // ============================================================
   // 4. RECONCILIATION (MANUAL TRIGGER ONLY)
@@ -533,13 +597,19 @@ export default function App() {
       alert("ვალუტის კურსები არ არის ატვირთული.");
       return;
     }
+    if (!operationalMonth) {
+      alert("მიუთითეთ საოპერაციო თვე.");
+      return;
+    }
 
     setIsProcessing(true);
     setProgressLabel('შეჯერების გაშვება...');
 
-    // Step 1: Convert GEL → USD using rates
+    // Step 1: Convert GEL → USD using rates.
+    // Rate date follows the operational-month rule: transfers within the month
+    // use their own date; transfers after month-end use the month-end rate.
     const converted = transactions.map(t => {
-      const rate = getRate(t.date, exchangeRates);
+      const rate = getRate(rateDateFor(t.date, opMonthEnd), exchangeRates);
       return {
         ...t,
         rateUsed: rate,
@@ -556,61 +626,64 @@ export default function App() {
     // Step 3: Create mutable payment pool
     const pool = converted.map(t => ({ ...t, remaining: t.amountUSD }));
 
-    // Step 4: Three-pass matching
-    const reconResults: ReconResult[] = sortedInvoices.map(inv => {
-      let paid = 0;
-      const matched: { date: string; amount: number; method: string }[] = [];
+    // Step 4: Two-pass matching.
+    // Passes run GLOBALLY (all invoices) in priority order so that the strong
+    // signal (exact invoice number) always wins the payment before the weaker
+    // client-name signal can claim it for a different invoice.
+    type Acc = { paid: number; matched: { date: string; amount: number; method: string }[] };
+    const acc = new Map<Invoice, Acc>();
+    sortedInvoices.forEach(inv => acc.set(inv, { paid: 0, matched: [] }));
+
+    // --- Pass 1: Exact Invoice Number Match (global, highest priority) ---
+    sortedInvoices.forEach(inv => {
+      const a = acc.get(inv)!;
       const invNum = (inv.invoiceNumber || '').trim().toLowerCase();
+      if (!invNum || invNum.length < 4) return;
+      // Word-boundary match so "070201" does not match "0702010" or "1070201".
+      const re = new RegExp(`(?<![\\w])${escapeRegExp(invNum)}(?![\\w])`, 'i');
 
-      // --- Pass 1: Invoice Number Match ---
-      if (invNum && invNum.length >= 4) {
-        pool.forEach(t => {
-          if (t.remaining <= 0) return;
-          const hasRef = t.invoiceRefs.some(ref => ref.includes(invNum) || invNum.includes(ref));
-          const inDetails = t.details.toLowerCase().includes(invNum) || t.details2.toLowerCase().includes(invNum);
-
-          if (hasRef || inDetails) {
-            const take = Math.min(t.remaining, inv.amountUSD - paid);
-            if (take > 0) {
-              paid += take;
-              t.remaining -= take;
-              matched.push({ date: t.date, amount: take, method: `ნომრით: ${inv.invoiceNumber}` });
-            }
+      pool.forEach(t => {
+        if (t.remaining <= 0 || a.paid >= inv.amountUSD) return;
+        const hasRef = t.invoiceRefs.some(ref => ref.toLowerCase() === invNum);
+        const inDetails = re.test(t.details) || re.test(t.details2);
+        if (hasRef || inDetails) {
+          const take = Math.min(t.remaining, inv.amountUSD - a.paid);
+          if (take > 0) {
+            a.paid += take;
+            t.remaining -= take;
+            a.matched.push({ date: t.date, amount: take, method: `ნომრით: ${inv.invoiceNumber}` });
           }
-        });
-      }
+        }
+      });
+    });
 
-      // --- Pass 2: Client Name / ID Match ---
-      if (paid < inv.amountUSD && inv.client) {
-        const clientLower = inv.client.toLowerCase().trim();
-        // Take first meaningful word (at least 4 chars)
-        const clientWords = clientLower.split(/\s+/).filter(w => w.length >= 4);
+    // --- Pass 2: Client Name Match (global, only invoices still open) ---
+    sortedInvoices.forEach(inv => {
+      const a = acc.get(inv)!;
+      if (a.paid >= inv.amountUSD || !inv.client) return;
+      // Significant tokens only: ≥4 chars and not a generic legal/industry word.
+      const tokens = inv.client.toLowerCase().trim().split(/\s+/)
+        .filter(w => w.length >= 4 && !GENERIC_TOKENS.has(w));
+      // No distinctive token → leave OPEN rather than risk a false allocation.
+      if (tokens.length === 0) return;
 
-        pool.forEach(t => {
-          if (t.remaining <= 0 || paid >= inv.amountUSD) return;
-          const companyLower = t.company.toLowerCase();
-          const detailsLower = `${t.details} ${t.details2}`.toLowerCase();
-
-          const nameMatch = clientWords.some(w => companyLower.includes(w) || detailsLower.includes(w));
-
-          if (nameMatch) {
-            const take = Math.min(t.remaining, inv.amountUSD - paid);
-            if (take > 0) {
-              paid += take;
-              t.remaining -= take;
-              matched.push({ date: t.date, amount: take, method: `კლიენტით: ${inv.client}` });
-            }
+      pool.forEach(t => {
+        if (t.remaining <= 0 || a.paid >= inv.amountUSD) return;
+        const hay = `${t.company} ${t.details} ${t.details2}`.toLowerCase();
+        if (tokens.some(w => hay.includes(w))) {
+          const take = Math.min(t.remaining, inv.amountUSD - a.paid);
+          if (take > 0) {
+            a.paid += take;
+            t.remaining -= take;
+            a.matched.push({ date: t.date, amount: take, method: `კლიენტით: ${inv.client}` });
           }
-        });
-      }
+        }
+      });
+    });
 
-      // --- Pass 3: FIFO for unmatched ---
-      // Note: FIFO only for remaining amount — skip if already fully paid
-      if (paid < inv.amountUSD * 0.5 && paid === 0) {
-        // Only use FIFO if zero direct matches found
-        // This prevents incorrect allocation
-        // We leave it OPEN instead of falsely matching
-      }
+    // --- Build results ---
+    const reconResults: ReconResult[] = sortedInvoices.map(inv => {
+      const { paid, matched } = acc.get(inv)!;
 
       // Calculate balance and status
       const balance = Math.round((inv.amountUSD - paid) * 100) / 100;
@@ -623,8 +696,11 @@ export default function App() {
       if (matched.length > 0) {
         const methods = [...new Set(matched.map(m => m.method))];
         comment = methods.join(' | ');
-        if (status === 'PAID' && Math.abs(balance) > 0.01) {
-          comment += ` | FX სხვაობა: $${Math.abs(balance).toFixed(2)}`;
+        if (status === 'PAID' && balance > 0.01) {
+          comment += ` | FX სხვაობა: $${balance.toFixed(2)}`;
+        }
+        if (balance < -0.5) {
+          comment += ` | ⚠️ ზედმეტად გადახდილი: $${Math.abs(balance).toFixed(2)}`;
         }
       } else {
         comment = '❌ გადახდა არ მოიძებნა — საჭიროებს გადამოწმებას';
@@ -648,7 +724,7 @@ export default function App() {
     setView('audit');
     setIsProcessing(false);
     setProgressLabel('');
-  }, [invoices, transactions, exchangeRates]);
+  }, [invoices, transactions, exchangeRates, opMonthEnd, operationalMonth]);
 
   // ============================================================
   // DEBTORS CALCULATION
@@ -748,7 +824,7 @@ export default function App() {
     if (transactions.length === 0) return;
 
     const converted = transactions.map(t => {
-      const rate = getRate(t.date, exchangeRates);
+      const rate = getRate(rateDateFor(t.date, opMonthEnd), exchangeRates);
       return {
         'თარიღი': t.date,
         'თანხა (GEL)': t.amountGEL,
@@ -769,7 +845,7 @@ export default function App() {
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, ws, 'Bank');
     XLSX.writeFile(wb, `Paski_Bank_Transactions.xlsx`);
-  }, [transactions, exchangeRates]);
+  }, [transactions, exchangeRates, opMonthEnd]);
 
   const exportDebtors = useCallback(() => {
     if (debtors.length === 0) return;
@@ -840,21 +916,26 @@ export default function App() {
       );
 
       if (matchedTransaction) {
-        const rate = getRate(matchedTransaction.date, exchangeRates);
+        // Transfer within the operational month → transfer-day rate;
+        // transfer after month-end → operational month-end rate.
+        const rate = getRate(rateDateFor(matchedTransaction.date, opMonthEnd), exchangeRates);
         return {
           ...bill,
           transferDate: matchedTransaction.date,
           fxr: rate
         };
       } else {
-        const year = parseInt(bill.serviceYear);
-        const month = parseInt(bill.serviceMonth);
-        // Ensure month is 1-12, otherwise fallback to current month
-        const validMonth = (month >= 1 && month <= 12) ? month : new Date().getMonth() + 1;
-        const validYear = (year >= 2000 && year <= 2100) ? year : new Date().getFullYear();
-        
-        const lastDay = new Date(validYear, validMonth, 0);
-        const dateStr = lastDay.toISOString().split('T')[0];
+        // No transfer found → use the operational month-end rate when set,
+        // otherwise fall back to the bill's own service-month end.
+        let dateStr = opMonthEnd;
+        if (!dateStr) {
+          const year = parseInt(bill.serviceYear);
+          const month = parseInt(bill.serviceMonth);
+          // Ensure month is 1-12, otherwise fallback to current month
+          const validMonth = (month >= 1 && month <= 12) ? month : new Date().getMonth() + 1;
+          const validYear = (year >= 2000 && year <= 2100) ? year : new Date().getFullYear();
+          dateStr = monthEndDate(`${validYear}-${String(validMonth).padStart(2, '0')}`);
+        }
         const rate = getRate(dateStr, exchangeRates);
         return {
           ...bill,
@@ -865,7 +946,7 @@ export default function App() {
     });
     setBills(updatedBills);
     alert("ინფორმაცია განახლდა.");
-  }, [bills, transactions, exchangeRates]);
+  }, [bills, transactions, exchangeRates, opMonthEnd]);
 
   const clearBills = () => {
     if (confirm("დარწმუნებული ხართ, რომ გსურთ ყველა ფაქტურის წაშლა?")) {
@@ -1077,10 +1158,26 @@ export default function App() {
               exit={{ opacity: 0, y: -10 }}
               transition={{ duration: 0.2 }}
             >
+              {/* Operational month — set before uploading; drives FX conversion */}
+              <div className="mb-6 p-5 rounded-2xl border-2 border-black bg-black text-white flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                <div>
+                  <h3 className="text-sm font-black tracking-tight">საოპერაციო თვე</h3>
+                  <p className="text-[11px] text-gray-300 mt-0.5 max-w-xl leading-relaxed">
+                    კონვერტაცია: თვის ბოლომდე ჩარიცხვა — ჩარიცხვის დღის კურსით; მომდევნო თვეში — საოპერაციო თვის ბოლო რიცხვის კურსით.
+                  </p>
+                </div>
+                <input
+                  type="month"
+                  value={operationalMonth}
+                  onChange={(e) => setOperationalMonth(e.target.value)}
+                  className="px-4 py-2.5 rounded-xl bg-white text-black text-sm font-bold outline-none"
+                />
+              </div>
+
               {/* Step Cards */}
               <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
                 {/* --- BANK --- */}
-                <div className={`relative p-6 rounded-2xl border-2 transition-all ${
+                <div className={`order-2 relative p-6 rounded-2xl border-2 transition-all ${
                   bankCount > 0 ? 'border-emerald-200 bg-emerald-50/30' : 'border-dashed border-gray-200 bg-white'
                 }`}>
                   <div className="flex items-start justify-between mb-4">
@@ -1088,7 +1185,7 @@ export default function App() {
                       <div className={`w-8 h-8 rounded-lg flex items-center justify-center text-sm font-black ${
                         bankCount > 0 ? 'bg-emerald-500 text-white' : 'bg-gray-100 text-gray-400'
                       }`}>
-                        {bankCount > 0 ? <CheckCircle2 size={16} /> : '1'}
+                        {bankCount > 0 ? <CheckCircle2 size={16} /> : '2'}
                       </div>
                       <div>
                         <h3 className="text-sm font-bold">საბანკო ამონაწერი</h3>
@@ -1139,7 +1236,7 @@ export default function App() {
                 </div>
 
                 {/* --- RATES --- */}
-                <div className={`relative p-6 rounded-2xl border-2 transition-all ${
+                <div className={`order-3 relative p-6 rounded-2xl border-2 transition-all ${
                   rateCount > 0 ? 'border-blue-200 bg-blue-50/30' : 'border-dashed border-gray-200 bg-white'
                 }`}>
                   <div className="flex items-start justify-between mb-4">
@@ -1147,7 +1244,7 @@ export default function App() {
                       <div className={`w-8 h-8 rounded-lg flex items-center justify-center text-sm font-black ${
                         rateCount > 0 ? 'bg-blue-500 text-white' : 'bg-gray-100 text-gray-400'
                       }`}>
-                        {rateCount > 0 ? <CheckCircle2 size={16} /> : '2'}
+                        {rateCount > 0 ? <CheckCircle2 size={16} /> : '3'}
                       </div>
                       <div>
                         <h3 className="text-sm font-bold">ვალუტის კურსები</h3>
@@ -1190,7 +1287,7 @@ export default function App() {
                 </div>
 
                 {/* --- INVOICES --- */}
-                <div className={`relative p-6 rounded-2xl border-2 transition-all ${
+                <div className={`order-1 relative p-6 rounded-2xl border-2 transition-all ${
                   invoiceCount > 0 ? 'border-purple-200 bg-purple-50/30' : 'border-dashed border-gray-200 bg-white'
                 }`}>
                   <div className="flex items-start justify-between mb-4">
@@ -1198,7 +1295,7 @@ export default function App() {
                       <div className={`w-8 h-8 rounded-lg flex items-center justify-center text-sm font-black ${
                         invoiceCount > 0 ? 'bg-purple-500 text-white' : 'bg-gray-100 text-gray-400'
                       }`}>
-                        {invoiceCount > 0 ? <CheckCircle2 size={16} /> : '3'}
+                        {invoiceCount > 0 ? <CheckCircle2 size={16} /> : '1'}
                       </div>
                       <div>
                         <h3 className="text-sm font-bold">ინვოისები</h3>
@@ -1238,13 +1335,32 @@ export default function App() {
                   {invoiceCount > 0 && (
                     <p className="text-purple-600 text-[11px] font-bold mt-3">✓ {invoiceCount} ინვოისი</p>
                   )}
+
+                  {/* Gemini API key — required only for PDF parsing, stored in-browser */}
+                  <div className="mt-3">
+                    <input
+                      type="password"
+                      value={geminiKey}
+                      onChange={(e) => {
+                        const v = e.target.value;
+                        setGeminiKey(v);
+                        try { localStorage.setItem('gemini_api_key', v); } catch { /* ignore */ }
+                      }}
+                      placeholder="Gemini API Key (PDF-ისთვის)"
+                      className="w-full px-3 py-2 bg-white border border-gray-200 rounded-lg text-[11px] outline-none focus:border-purple-300 transition-colors"
+                    />
+                    <p className="text-[9px] text-gray-400 mt-1 leading-snug">
+                      მხოლოდ PDF-ის წასაკითხად. გასაღები ინახება მხოლოდ თქვენს ბრაუზერში.
+                      <a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noreferrer" className="text-blue-500 hover:underline"> მიიღეთ გასაღები</a>
+                    </p>
+                  </div>
                 </div>
               </div>
 
               {/* RUN BUTTON */}
               <button
                 onClick={runReconciliation}
-                disabled={isProcessing || bankCount === 0 || rateCount === 0 || invoiceCount === 0}
+                disabled={isProcessing || bankCount === 0 || rateCount === 0 || invoiceCount === 0 || !operationalMonth}
                 className="w-full py-5 bg-black text-white rounded-2xl font-black text-sm tracking-widest hover:bg-blue-600 transition-all disabled:opacity-30 disabled:cursor-not-allowed flex items-center justify-center gap-3"
               >
                 {isProcessing ? (
@@ -1268,26 +1384,26 @@ export default function App() {
                   <h4 className="text-sm font-bold text-gray-500">შაბლონები გადმოსაწერად</h4>
                 </div>
                 <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-                  <button 
+                  <button
+                    onClick={() => downloadTemplate('invoices')}
+                    className="flex flex-col items-center p-4 bg-white rounded-2xl border border-gray-100 hover:border-blue-200 hover:shadow-xl transition-all group"
+                  >
+                    <Receipt className="text-gray-300 group-hover:text-purple-500 mb-2 transition-colors" size={24} />
+                    <span className="text-[10px] font-bold text-gray-400 group-hover:text-gray-600 uppercase tracking-tighter">ინვოისები (XLSX)</span>
+                  </button>
+                  <button
                     onClick={() => downloadTemplate('bank')}
                     className="flex flex-col items-center p-4 bg-white rounded-2xl border border-gray-100 hover:border-blue-200 hover:shadow-xl transition-all group"
                   >
                     <FileSpreadsheet className="text-gray-300 group-hover:text-emerald-500 mb-2 transition-colors" size={24} />
                     <span className="text-[10px] font-bold text-gray-400 group-hover:text-gray-600 uppercase tracking-tighter">საბანკო ამონაწერი</span>
                   </button>
-                  <button 
+                  <button
                     onClick={() => downloadTemplate('rates')}
                     className="flex flex-col items-center p-4 bg-white rounded-2xl border border-gray-100 hover:border-blue-200 hover:shadow-xl transition-all group"
                   >
                     <DollarSign className="text-gray-300 group-hover:text-blue-500 mb-2 transition-colors" size={24} />
                     <span className="text-[10px] font-bold text-gray-400 group-hover:text-gray-600 uppercase tracking-tighter">ვალუტის კურსები</span>
-                  </button>
-                  <button 
-                    onClick={() => downloadTemplate('invoices')}
-                    className="flex flex-col items-center p-4 bg-white rounded-2xl border border-gray-100 hover:border-blue-200 hover:shadow-xl transition-all group"
-                  >
-                    <Receipt className="text-gray-300 group-hover:text-purple-500 mb-2 transition-colors" size={24} />
-                    <span className="text-[10px] font-bold text-gray-400 group-hover:text-gray-600 uppercase tracking-tighter">ინვოისები (XLSX)</span>
                   </button>
                 </div>
                 <p className="mt-6 text-[9px] text-center text-gray-400 leading-relaxed">
