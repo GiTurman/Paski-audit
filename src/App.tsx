@@ -217,10 +217,10 @@ export default function App() {
           const findCol = (...names: string[]) => keys.find(k => names.some(n => k.toLowerCase().includes(n.toLowerCase())));
 
           const dateCol = findCol('Date', 'თარიღი', 'გადახდის თარიღი');
-          const amountCol = findCol('Amount (GEL)', 'Amount', 'თანხა', 'გადახდილი თანხა');
-          const companyCol = findCol('Company', 'კომპანია', 'გადამხდელი');
-          const idCol = findCol('ID', 'საიდენტიფიკაციო');
-          const detailsCol = findCol('Details', 'Description', 'დეტალები', 'დანიშნულება');
+          const amountCol = findCol('Amount (GEL)', 'Amount', 'თანხა', 'გადახდილი თანხა', 'კრედიტი');
+          const companyCol = findCol('Company', 'კომპანია', 'გადამხდელი', 'გამმგზავნის დასახელება');
+          const idCol = findCol('ID', 'საიდენტიფიკაციო', 'გამმგზავნის საიდენტიფიკაციო კოდი');
+          const detailsCol = findCol('Details', 'Description', 'დეტალები', 'დანიშნულება', 'ოპერაციის შინაარსი');
           const details2Col = findCol('Details 2', 'Details2', 'დეტალები 2');
 
           if (!dateCol || !amountCol) continue;
@@ -874,6 +874,33 @@ export default function App() {
     }
   };
 
+  const regenerateBillsFromInvoices = () => {
+    if (invoices.length === 0) {
+      alert("ჯერ ატვირთეთ ინვოისები.");
+      return;
+    }
+    const newBills: Bill[] = invoices.map(inv => {
+      const d = new Date(inv.date);
+      // Basic bill creation from invoice
+      return {
+        id: uid(),
+        serviceMonth: String(d.getMonth() + 1).padStart(2, '0'),
+        serviceYear: String(d.getFullYear()),
+        taxID: '', // Invoices state might not have taxID if it came from PDF without it
+        vendorName: inv.client,
+        description: `Invoice #${inv.invoiceNumber}`,
+        stayDates: '',
+        invoiceNumber: inv.invoiceNumber,
+        invoiceDate: inv.date,
+        amountGEL: Math.round(inv.amountUSD * 2.7 * 100) / 100, // Fallback conversion
+        transferDate: undefined,
+        fxr: undefined
+      };
+    });
+    setBills(newBills);
+    alert(`${newBills.length} ფაქტურა დაგენერირდა.`);
+  };
+
   const exportBillsToXLSX = () => {
     const wsData = bills.map(b => ({
       'მომსახურების თვე': b.serviceMonth,
@@ -892,6 +919,48 @@ export default function App() {
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, ws, 'ა_ფატურა');
     XLSX.writeFile(wb, 'ა_ფატურა.xlsx');
+  };
+
+  const downloadTemplate = (type: 'bank' | 'rates' | 'invoices') => {
+    let data: any[] = [];
+    let fileName = '';
+    
+    if (type === 'bank') {
+      data = [
+        { 
+          'თარიღი': '2026-04-03', 
+          'კრედიტი': 180.73, 
+          'გამმგზავნის დასახელება': 'შპს ჩაჩქერ პლიუს საქართველო', 
+          'გამმგზავნის საიდენტიფიკაციო კოდი': '405723409', 
+          'ოპერაციის შინაარსი': 'ჩარიცხვა - თანხა: GEL180.73; გადმომრიცხავი: შპს ჩაჩქერ პლიუს საქართველო; ანგარიში...' 
+        },
+        { 
+          'თარიღი': '2026-04-06', 
+          'კრედიტი': 229.34, 
+          'გამმგზავნის დასახელება': 'შპს თრეველ დოორ, 422725206', 
+          'გამმგზავნის საიდენტიფიკაციო კოდი': '422725206', 
+          'ოპერაციის შინაარსი': 'ჩარიცხვა - თანხა: GEL229.34; გადმომრიცხავი: შპს თრეველ დოორ, 422725206; ანგარიში...' 
+        }
+      ];
+      fileName = 'shabloni_sabanko_amonaceri.xlsx';
+    } else if (type === 'rates') {
+      data = [
+        { 'Date': '2024-05-01', 'USD': 2.70 },
+        { 'Date': '2024-05-02', 'USD': 2.71 }
+      ];
+      fileName = 'shabloni_valutis_kursebi.xlsx';
+    } else if (type === 'invoices') {
+      data = [
+        { 'Vendor Name': 'Tour Agency Name', 'Invoice #': '010524', 'Invoice Date': '2024-05-01', 'Description': 'Stay May 1-5', 'Invoice Total': 500, 'Currency': 'USD', 'Tax ID': '204567890' },
+        { 'Vendor Name': 'Another Client', 'Invoice #': '020524', 'Invoice Date': '2024-05-02', 'Description': 'Services', 'Invoice Total': 1200, 'Currency': 'GEL', 'Tax ID': '208123456' }
+      ];
+      fileName = 'shabloni_invoisebi.xlsx';
+    }
+    
+    const ws = XLSX.utils.json_to_sheet(data);
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, 'Template');
+    XLSX.writeFile(wb, fileName);
   };
 
   // ============================================================
@@ -1023,7 +1092,12 @@ export default function App() {
                       </div>
                       <div>
                         <h3 className="text-sm font-bold">საბანკო ამონაწერი</h3>
-                        <p className="text-[10px] text-gray-400">XLSX ფორმატი</p>
+                        <div className="flex gap-2">
+                          <p className="text-[10px] text-gray-400">XLSX ფორმატი</p>
+                          <button onClick={() => downloadTemplate('bank')} className="text-[10px] text-blue-500 hover:underline flex items-center gap-1 font-bold">
+                            <Download size={8} /> შაბლონი
+                          </button>
+                        </div>
                       </div>
                     </div>
                     {bankCount > 0 && (
@@ -1077,7 +1151,12 @@ export default function App() {
                       </div>
                       <div>
                         <h3 className="text-sm font-bold">ვალუტის კურსები</h3>
-                        <p className="text-[10px] text-gray-400">Date + Rate სვეტები</p>
+                        <div className="flex gap-2">
+                          <p className="text-[10px] text-gray-400">Date + Rate სვეტები</p>
+                          <button onClick={() => downloadTemplate('rates')} className="text-[10px] text-blue-500 hover:underline flex items-center gap-1 font-bold">
+                            <Download size={8} /> შაბლონი
+                          </button>
+                        </div>
                       </div>
                     </div>
                     {rateCount > 0 && (
@@ -1123,7 +1202,12 @@ export default function App() {
                       </div>
                       <div>
                         <h3 className="text-sm font-bold">ინვოისები</h3>
-                        <p className="text-[10px] text-gray-400">PDF / XLSX ფორმატი</p>
+                        <div className="flex gap-2">
+                          <p className="text-[10px] text-gray-400">PDF / XLSX ფორმატი</p>
+                          <button onClick={() => downloadTemplate('invoices')} className="text-[10px] text-blue-500 hover:underline flex items-center gap-1 font-bold">
+                            <Download size={8} /> შაბლონი
+                          </button>
+                        </div>
                       </div>
                     </div>
                     {invoiceCount > 0 && (
@@ -1176,6 +1260,41 @@ export default function App() {
                   ატვირთეთ სამივე ფაილი შეჯერების გასაშვებად
                 </p>
               ) : null}
+
+              {/* TEMPLATES SECTION */}
+              <div className="mt-12 p-8 bg-gray-50 rounded-3xl border border-gray-100 border-dashed">
+                <div className="flex items-center gap-3 mb-6">
+                  <Download size={20} className="text-gray-400" />
+                  <h4 className="text-sm font-bold text-gray-500">შაბლონები გადმოსაწერად</h4>
+                </div>
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                  <button 
+                    onClick={() => downloadTemplate('bank')}
+                    className="flex flex-col items-center p-4 bg-white rounded-2xl border border-gray-100 hover:border-blue-200 hover:shadow-xl transition-all group"
+                  >
+                    <FileSpreadsheet className="text-gray-300 group-hover:text-emerald-500 mb-2 transition-colors" size={24} />
+                    <span className="text-[10px] font-bold text-gray-400 group-hover:text-gray-600 uppercase tracking-tighter">საბანკო ამონაწერი</span>
+                  </button>
+                  <button 
+                    onClick={() => downloadTemplate('rates')}
+                    className="flex flex-col items-center p-4 bg-white rounded-2xl border border-gray-100 hover:border-blue-200 hover:shadow-xl transition-all group"
+                  >
+                    <DollarSign className="text-gray-300 group-hover:text-blue-500 mb-2 transition-colors" size={24} />
+                    <span className="text-[10px] font-bold text-gray-400 group-hover:text-gray-600 uppercase tracking-tighter">ვალუტის კურსები</span>
+                  </button>
+                  <button 
+                    onClick={() => downloadTemplate('invoices')}
+                    className="flex flex-col items-center p-4 bg-white rounded-2xl border border-gray-100 hover:border-blue-200 hover:shadow-xl transition-all group"
+                  >
+                    <Receipt className="text-gray-300 group-hover:text-purple-500 mb-2 transition-colors" size={24} />
+                    <span className="text-[10px] font-bold text-gray-400 group-hover:text-gray-600 uppercase tracking-tighter">ინვოისები (XLSX)</span>
+                  </button>
+                </div>
+                <p className="mt-6 text-[9px] text-center text-gray-400 leading-relaxed">
+                  * გთხოვთ, გამოიყენოთ ზემოაღნიშნული შაბლონები მონაცემთა სწორი იმპორტისთვის. <br/>
+                  ინვოისების შემთხვევაში PDF ფორმატი ასევე მხარდაჭერილია ავტომატური ამოკითხვით.
+                </p>
+              </div>
 
               {/* DATA PREVIEW TABLES */}
               {/* Bank Transactions Preview */}
@@ -1496,6 +1615,12 @@ export default function App() {
                     className="flex items-center gap-2 px-5 py-2.5 bg-red-100 text-red-600 rounded-xl text-xs font-bold hover:bg-red-200 transition-all"
                   >
                     <Trash2 size={14} /> გასუფთავება
+                  </button>
+                  <button
+                    onClick={regenerateBillsFromInvoices}
+                    className="flex items-center gap-2 px-5 py-2.5 bg-indigo-100 text-indigo-600 rounded-xl text-xs font-bold hover:bg-indigo-200 transition-all"
+                  >
+                    <FileSpreadsheet size={14} /> ფაქტურების გენერირება
                   </button>
                   <button
                     onClick={updateBillsFromTransactions}
