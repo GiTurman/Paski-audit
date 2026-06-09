@@ -108,10 +108,12 @@ export async function processInvoiceBatch(
   files: File[],
   onProgress?: (progress: number) => void,
   onStatus?: (msg: string) => void,
+  userApiKey?: string,
 ): Promise<Invoice[]> {
-  // vite.config.ts defines process.env.GEMINI_API_KEY at build time via loadEnv.
-  // No hardcoded fallback — the key must never be committed or shipped in the bundle.
-  const apiKey = process.env.GEMINI_API_KEY;
+  // Key resolution order: key entered in the app UI, then the build-time env
+  // var (vite.config.ts defines process.env.GEMINI_API_KEY via loadEnv).
+  // No hardcoded fallback — the key must never be committed or shipped in source.
+  const apiKey = (userApiKey && userApiKey.trim()) || process.env.GEMINI_API_KEY;
 
   if (!apiKey || apiKey.trim() === '') {
     throw new Error("Gemini API Key არ არის კონფიგურირებული.");

@@ -216,6 +216,10 @@ export default function App() {
   const [batchYear, setBatchYear] = useState('');
   // Operational month ("YYYY-MM") — drives the FX conversion-date rule.
   const [operationalMonth, setOperationalMonth] = useState(new Date().toISOString().slice(0, 7));
+  // Gemini API key for PDF parsing — kept in the browser only, never in source.
+  const [geminiKey, setGeminiKey] = useState(() => {
+    try { return localStorage.getItem('gemini_api_key') || ''; } catch { return ''; }
+  });
 
   // --- Counts for step indicators ---
   const bankCount = transactions.length;
@@ -526,7 +530,8 @@ export default function App() {
           },
           (statusMsg) => {
             setProgressLabel(statusMsg);
-          }
+          },
+          geminiKey
         );
         parsedInvoices = [...parsedInvoices, ...pdfParsed];
       }
@@ -550,7 +555,7 @@ export default function App() {
       setProgressLabel('');
       e.target.value = '';
     }
-  }, []);
+  }, [geminiKey]);
 
   // ============================================================
   // 4. RECONCILIATION (MANUAL TRIGGER ONLY)
@@ -1306,6 +1311,25 @@ export default function App() {
                   {invoiceCount > 0 && (
                     <p className="text-purple-600 text-[11px] font-bold mt-3">✓ {invoiceCount} ინვოისი</p>
                   )}
+
+                  {/* Gemini API key — required only for PDF parsing, stored in-browser */}
+                  <div className="mt-3">
+                    <input
+                      type="password"
+                      value={geminiKey}
+                      onChange={(e) => {
+                        const v = e.target.value;
+                        setGeminiKey(v);
+                        try { localStorage.setItem('gemini_api_key', v); } catch { /* ignore */ }
+                      }}
+                      placeholder="Gemini API Key (PDF-ისთვის)"
+                      className="w-full px-3 py-2 bg-white border border-gray-200 rounded-lg text-[11px] outline-none focus:border-purple-300 transition-colors"
+                    />
+                    <p className="text-[9px] text-gray-400 mt-1 leading-snug">
+                      მხოლოდ PDF-ის წასაკითხად. გასაღები ინახება მხოლოდ თქვენს ბრაუზერში.
+                      <a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noreferrer" className="text-blue-500 hover:underline"> მიიღეთ გასაღები</a>
+                    </p>
+                  </div>
                 </div>
               </div>
 
