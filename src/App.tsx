@@ -156,6 +156,23 @@ const getRate = (date: string, rates: Record<string, number>): number => {
   return 0;
 };
 
+/** Last day (YYYY-MM-DD) of an operational month given as "YYYY-MM". */
+const monthEndDate = (operationalMonth: string): string => {
+  if (!operationalMonth) return '';
+  const [y, m] = operationalMonth.split('-').map(Number);
+  if (!y || !m) return '';
+  const d = new Date(y, m, 0); // day 0 of next month = last day of month m (1-based)
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+};
+
+/**
+ * Pick the date whose FX rate should convert a transfer, per the operational-month rule:
+ * - transfer on/before the operational month end → the transfer date itself
+ * - transfer after the operational month end (next month+) → the month-end date
+ */
+const rateDateFor = (transferDate: string, opMonthEnd: string): string =>
+  (opMonthEnd && transferDate && transferDate > opMonthEnd) ? opMonthEnd : transferDate;
+
 /** Format number with commas */
 const fmt = (n: number, dec = 2) => n.toFixed(dec).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
 
@@ -197,12 +214,15 @@ export default function App() {
   const [searchTerm, setSearchTerm] = useState('');
   const [batchMonth, setBatchMonth] = useState('');
   const [batchYear, setBatchYear] = useState('');
+  // Operational month ("YYYY-MM") — drives the FX conversion-date rule.
+  const [operationalMonth, setOperationalMonth] = useState(new Date().toISOString().slice(0, 7));
 
   // --- Counts for step indicators ---
   const bankCount = transactions.length;
   const rateCount = Object.keys(exchangeRates).length;
   const invoiceCount = invoices.length;
   const hasResults = results.length > 0;
+  const opMonthEnd = useMemo(() => monthEndDate(operationalMonth), [operationalMonth]);
 
   // ============================================================
   // 1. BANK UPLOAD (APPEND - multiple files)
@@ -548,13 +568,19 @@ export default function App() {
       alert("ვალუტის კურსები არ არის ატვირთული.");
       return;
     }
+    if (!operationalMonth) {
+      alert("მიუთითეთ საოპერაციო თვე.");
+      return;
+    }
 
     setIsProcessing(true);
     setProgressLabel('შეჯერების გაშვება...');
 
-    // Step 1: Convert GEL → USD using rates
+    // Step 1: Convert GEL → USD using rates.
+    // Rate date follows the operational-month rule: transfers within the month
+    // use their own date; transfers after month-end use the month-end rate.
     const converted = transactions.map(t => {
-      const rate = getRate(t.date, exchangeRates);
+      const rate = getRate(rateDateFor(t.date, opMonthEnd), exchangeRates);
       return {
         ...t,
         rateUsed: rate,
@@ -669,7 +695,7 @@ export default function App() {
     setView('audit');
     setIsProcessing(false);
     setProgressLabel('');
-  }, [invoices, transactions, exchangeRates]);
+  }, [invoices, transactions, exchangeRates, opMonthEnd, operationalMonth]);
 
   // ============================================================
   // DEBTORS CALCULATION
@@ -769,7 +795,7 @@ export default function App() {
     if (transactions.length === 0) return;
 
     const converted = transactions.map(t => {
-      const rate = getRate(t.date, exchangeRates);
+      const rate = getRate(rateDateFor(t.date, opMonthEnd), exchangeRates);
       return {
         'თარიღი': t.date,
         'თანხა (GEL)': t.amountGEL,
@@ -790,7 +816,7 @@ export default function App() {
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, ws, 'Bank');
     XLSX.writeFile(wb, `Paski_Bank_Transactions.xlsx`);
-  }, [transactions, exchangeRates]);
+  }, [transactions, exchangeRates, opMonthEnd]);
 
   const exportDebtors = useCallback(() => {
     if (debtors.length === 0) return;
@@ -861,21 +887,26 @@ export default function App() {
       );
 
       if (matchedTransaction) {
-        const rate = getRate(matchedTransaction.date, exchangeRates);
+        // Transfer within the operational month → transfer-day rate;
+        // transfer after month-end → operational month-end rate.
+        const rate = getRate(rateDateFor(matchedTransaction.date, opMonthEnd), exchangeRates);
         return {
           ...bill,
           transferDate: matchedTransaction.date,
           fxr: rate
         };
       } else {
-        const year = parseInt(bill.serviceYear);
-        const month = parseInt(bill.serviceMonth);
-        // Ensure month is 1-12, otherwise fallback to current month
-        const validMonth = (month >= 1 && month <= 12) ? month : new Date().getMonth() + 1;
-        const validYear = (year >= 2000 && year <= 2100) ? year : new Date().getFullYear();
-        
-        const lastDay = new Date(validYear, validMonth, 0);
-        const dateStr = lastDay.toISOString().split('T')[0];
+        // No transfer found → use the operational month-end rate when set,
+        // otherwise fall back to the bill's own service-month end.
+        let dateStr = opMonthEnd;
+        if (!dateStr) {
+          const year = parseInt(bill.serviceYear);
+          const month = parseInt(bill.serviceMonth);
+          // Ensure month is 1-12, otherwise fallback to current month
+          const validMonth = (month >= 1 && month <= 12) ? month : new Date().getMonth() + 1;
+          const validYear = (year >= 2000 && year <= 2100) ? year : new Date().getFullYear();
+          dateStr = monthEndDate(`${validYear}-${String(validMonth).padStart(2, '0')}`);
+        }
         const rate = getRate(dateStr, exchangeRates);
         return {
           ...bill,
@@ -886,7 +917,7 @@ export default function App() {
     });
     setBills(updatedBills);
     alert("ინფორმაცია განახლდა.");
-  }, [bills, transactions, exchangeRates]);
+  }, [bills, transactions, exchangeRates, opMonthEnd]);
 
   const clearBills = () => {
     if (confirm("დარწმუნებული ხართ, რომ გსურთ ყველა ფაქტურის წაშლა?")) {
@@ -1098,6 +1129,22 @@ export default function App() {
               exit={{ opacity: 0, y: -10 }}
               transition={{ duration: 0.2 }}
             >
+              {/* Operational month — set before uploading; drives FX conversion */}
+              <div className="mb-6 p-5 rounded-2xl border-2 border-black bg-black text-white flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                <div>
+                  <h3 className="text-sm font-black tracking-tight">საოპერაციო თვე</h3>
+                  <p className="text-[11px] text-gray-300 mt-0.5 max-w-xl leading-relaxed">
+                    კონვერტაცია: თვის ბოლომდე ჩარიცხვა — ჩარიცხვის დღის კურსით; მომდევნო თვეში — საოპერაციო თვის ბოლო რიცხვის კურსით.
+                  </p>
+                </div>
+                <input
+                  type="month"
+                  value={operationalMonth}
+                  onChange={(e) => setOperationalMonth(e.target.value)}
+                  className="px-4 py-2.5 rounded-xl bg-white text-black text-sm font-bold outline-none"
+                />
+              </div>
+
               {/* Step Cards */}
               <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
                 {/* --- BANK --- */}
@@ -1265,7 +1312,7 @@ export default function App() {
               {/* RUN BUTTON */}
               <button
                 onClick={runReconciliation}
-                disabled={isProcessing || bankCount === 0 || rateCount === 0 || invoiceCount === 0}
+                disabled={isProcessing || bankCount === 0 || rateCount === 0 || invoiceCount === 0 || !operationalMonth}
                 className="w-full py-5 bg-black text-white rounded-2xl font-black text-sm tracking-widest hover:bg-blue-600 transition-all disabled:opacity-30 disabled:cursor-not-allowed flex items-center justify-center gap-3"
               >
                 {isProcessing ? (
